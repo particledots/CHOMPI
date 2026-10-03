@@ -1,0 +1,28 @@
+# UNTESTED convenience: builds the WT8 AU/VST3/Standalone on a GitHub-hosted Mac and uploads a zip.
+# Run it from the Actions tab (Run workflow), or it runs on pushes that touch wt8-plugin/.
+name: build-wt8-macos
+on:
+  workflow_dispatch:
+  push:
+    paths: ['wt8-plugin/**']
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S wt8-plugin -B build -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build --config Release -j 4
+      - name: Headless tests
+        run: |
+          ./build/render_test wt8-plugin/wavetables build/render_test_out.wav
+          ./build/plugin_test
+      - name: Package
+        run: |
+          mkdir out
+          cp -R build/WT8_artefacts/Release/AU/WT8.component out/ || true
+          cp -R build/WT8_artefacts/Release/VST3/WT8.vst3 out/ || true
+          cd out && zip -ry ../WT8-macos.zip .
+      - uses: actions/upload-artifact@v4
+        with: { name: WT8-macos, path: WT8-macos.zip }
