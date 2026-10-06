@@ -1,12 +1,14 @@
 cmake_minimum_required(VERSION 3.22)
+# These two must be set BEFORE project(), or CMake ignores them (the first CI build was arm64-only because of this).
+if(APPLE)
+  set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "")
+  set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64" CACHE STRING "Universal: Apple silicon + Intel")
+endif()
+
 project(WT8 VERSION 0.1.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-if(APPLE)
-  set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "")
-  set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64" CACHE STRING "")
-endif()
 
 option(WT8_ENGINE_ONLY "Build only the engine + headless test (no JUCE, no plugin)" OFF)
 
