@@ -20,11 +20,15 @@ jobs:
           ./build/plugin_test
       - name: Verify universal binary (arm64 + x86_64)
         run: |
-          for bin in build/WT8_artefacts/Release/AU/WT8.component/Contents/MacOS/WT8 \
-                     build/WT8_artefacts/Release/VST3/WT8.vst3/Contents/MacOS/WT8; do
-            archs=$(lipo -archs "$bin"); echo "$bin: $archs"
-            case "$archs" in *arm64*x86_64*|*x86_64*arm64*) ;; *) echo "NOT UNIVERSAL: $archs"; exit 1;; esac
+          fail=0
+          echo "::notice title=artefacts::$(find build/WT8_artefacts -maxdepth 4 -name 'WT8*' | tr '\n' ' ')"
+          for bin in $(find build/WT8_artefacts -path '*Contents/MacOS/WT8' -type f); do
+            archs=$(lipo -archs "$bin" 2>&1)
+            echo "::notice title=lipo::$bin => $archs"
+            case "$archs" in *arm64*x86_64*|*x86_64*arm64*) ;; *) fail=1;; esac
           done
+          echo "::notice title=cmake-archs::$(grep -m1 CMAKE_OSX_ARCHITECTURES build/CMakeCache.txt)"
+          [ "$fail" = 0 ] || { echo "NOT UNIVERSAL"; exit 1; }
       - name: Package
         run: |
           mkdir out
