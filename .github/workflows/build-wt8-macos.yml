@@ -18,6 +18,13 @@ jobs:
         run: |
           ./build/render_test wt8-plugin/wavetables build/render_test_out.wav
           ./build/plugin_test
+      - name: Verify universal binary (arm64 + x86_64)
+        run: |
+          for bin in build/WT8_artefacts/Release/AU/WT8.component/Contents/MacOS/WT8 \
+                     build/WT8_artefacts/Release/VST3/WT8.vst3/Contents/MacOS/WT8; do
+            archs=$(lipo -archs "$bin"); echo "$bin: $archs"
+            case "$archs" in *arm64*x86_64*|*x86_64*arm64*) ;; *) echo "NOT UNIVERSAL: $archs"; exit 1;; esac
+          done
       - name: Package
         run: |
           mkdir out
