@@ -1,4 +1,4 @@
-# WT8 (working title) — wavetable synth plugin built from the CHOMPI WAVE engine
+# ipmohc (formerly WT8) — wavetable synth plugin built from the CHOMPI WAVE engine
 
 An 8-voice wavetable synthesizer (AU / VST3 / Standalone) that runs the **CHOMPI WAVE 1.0** synth engine
 from the open-source CHOMPI release (https://github.com/CHOMPI-Club/CHOMPI, MIT) inside a JUCE plugin.
@@ -26,12 +26,12 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release -j 8
 ```
 The first configure downloads JUCE (needs internet, a couple of minutes). A successful build copies:
-- `~/Library/Audio/Plug-Ins/Components/WT8.component`  (Audio Unit — this is the one Logic uses)
-- `~/Library/Audio/Plug-Ins/VST3/WT8.vst3`
+- `~/Library/Audio/Plug-Ins/Components/ipmohc.component`  (Audio Unit — this is the one Logic uses)
+- `~/Library/Audio/Plug-Ins/VST3/ipmohc.vst3`
 
 Check it: `./build/render_test wavetables build/out.wav` and `./build/plugin_test` should both print PASS.
-Validate as an Audio Unit: `auval -v aumu Wt8a Ptdt`. Then in Logic: a Software Instrument track ->
-Instrument slot -> AU Instruments -> particledots -> WT8. If it doesn't show up, restart Logic
+Validate as an Audio Unit: `auval -v aumu Ipmo Ptdt`. Then in Logic: a Software Instrument track ->
+Instrument slot -> AU Instruments -> particledots -> ipmohc. If it doesn't show up, restart Logic
 (Logic Pro > Settings > Plug-in Manager > Reset & Rescan Selection).
 
 ## Parameters (all map to the CHOMPI WAVE panel)

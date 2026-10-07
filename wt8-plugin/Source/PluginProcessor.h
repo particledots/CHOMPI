@@ -18,7 +18,7 @@ class WT8AudioProcessor : public juce::AudioProcessor
     juce::AudioProcessorEditor* createEditor() override;
     bool hasEditor() const override { return true; }
 
-    const juce::String getName() const override { return "WT8"; }
+    const juce::String getName() const override { return "ipmohc"; }
     bool acceptsMidi() const override { return true; }
     bool producesMidi() const override { return false; }
     bool isMidiEffect() const override { return false; }

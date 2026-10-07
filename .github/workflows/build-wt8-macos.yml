@@ -20,20 +20,22 @@ jobs:
           ./build/plugin_test
       - name: Verify universal binary (arm64 + x86_64)
         run: |
-          fail=0
-          echo "::notice title=artefacts::$(find build/WT8_artefacts -maxdepth 4 -name 'WT8*' | tr '\n' ' ')"
-          for bin in $(find build/WT8_artefacts -path '*Contents/MacOS/WT8' -type f); do
+          fail=0; n=0
+          echo "::notice title=artefacts::$(find build/WT8_artefacts -maxdepth 4 -name 'ipmohc*' | tr '\n' ' ')"
+          for bin in $(find build/WT8_artefacts -path '*Contents/MacOS/ipmohc' -type f); do
+            n=$((n+1))
             archs=$(lipo -archs "$bin" 2>&1)
             echo "::notice title=lipo::$bin => $archs"
             case "$archs" in *arm64*x86_64*|*x86_64*arm64*) ;; *) fail=1;; esac
           done
           echo "::notice title=cmake-archs::$(grep -m1 CMAKE_OSX_ARCHITECTURES build/CMakeCache.txt)"
+          [ "$n" -ge 1 ] || { echo "NO BINARIES FOUND"; exit 1; }
           [ "$fail" = 0 ] || { echo "NOT UNIVERSAL"; exit 1; }
       - name: Package
         run: |
           mkdir out
-          cp -R build/WT8_artefacts/Release/AU/WT8.component out/ || true
-          cp -R build/WT8_artefacts/Release/VST3/WT8.vst3 out/ || true
-          cd out && zip -ry ../WT8-macos.zip .
+          cp -R build/WT8_artefacts/Release/AU/ipmohc.component out/
+          cp -R build/WT8_artefacts/Release/VST3/ipmohc.vst3 out/ || true
+          cd out && zip -ry ../ipmohc-macos.zip .
       - uses: actions/upload-artifact@v4
-        with: { name: WT8-macos, path: WT8-macos.zip }
+        with: { name: ipmohc-macos, path: ipmohc-macos.zip }
