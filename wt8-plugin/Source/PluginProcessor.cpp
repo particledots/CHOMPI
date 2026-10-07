@@ -1,6 +1,7 @@
 #include "PluginProcessor.h"
 #include "WT8Engine.h"
 #include "PluginEditor.h"
+#include <limits>
 #include <BinaryData.h>
 
 namespace
@@ -13,6 +14,16 @@ std::unique_ptr<AudioParameterFloat> f(const char* id, const char* name, float l
 {
     return std::make_unique<AudioParameterFloat>(juce::ParameterID{id, 1}, name, NormalisableRange<float>(lo, hi), def);
 }
+std::unique_ptr<juce::AudioParameterBool> b(const char* id, const char* name, bool def)
+{
+    return std::make_unique<juce::AudioParameterBool>(juce::ParameterID{id, 1}, name, def);
+}
+
+std::unique_ptr<juce::AudioParameterChoice> c(const char* id, const char* name, const juce::StringArray& choices, int def)
+{
+    return std::make_unique<juce::AudioParameterChoice>(juce::ParameterID{id, 1}, name, choices, def);
+}
+
 std::unique_ptr<AudioParameterInt> i(const char* id, const char* name, int lo, int hi, int def)
 {
     return std::make_unique<AudioParameterInt>(juce::ParameterID{id, 1}, name, lo, hi, def);
@@ -41,6 +52,15 @@ juce::AudioProcessorValueTreeState::ParameterLayout WT8AudioProcessor::createLay
     l.add(f("pan", "Pan", 0.f, 1.f, 0.5f));
     l.add(f("comp", "Compressor <-> Saturation", 0.f, 1.f, 0.f));
     l.add(f("output", "Output Boost (dB)", -12.f, 36.f, 20.f));
+
+    // Step sequencer. (Ids are stable; new ones only ever get added.)
+    juce::StringArray divisions;
+    for (int d = 0; d < StepSequencer::kNumDivisions; ++d) divisions.add(StepSequencer::divisionName(d));
+    l.add(b("seq_play", "Seq Play", false));
+    l.add(c("seq_sync", "Seq Sync", juce::StringArray{"Free", "Logic"}, 0));
+    l.add(c("seq_div", "Seq Step Length", divisions, 2));
+    l.add(f("seq_gate", "Seq Gate", 0.05f, 1.f, 0.5f));
+    l.add(b("seq_mute", "Seq Mute", false));
     return l;
 }
 
@@ -83,6 +103,7 @@ void WT8AudioProcessor::prepareToPlay(double sampleRate, int)
     loadWavetables(*fresh);
     engine_ = std::move(fresh);
     engineReady_ = true;
+    seq_.resetTransport();
 }
 
 void WT8AudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
@@ -117,23 +138,59 @@ void WT8AudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
     float* left = buffer.getWritePointer(0);
     float* right = buffer.getWritePointer(1);
 
-    // Render in segments so notes start at their sample-accurate position.
-    int pos = 0;
-    for (const auto meta : midi)
-    {
-        const int evPos = juce::jlimit(0, numSamples, meta.samplePosition);
-        if (evPos > pos)
+    // Sequencer: ask it which notes start/stop in this block (timed from the host's tempo and position).
+    SeqHostInfo host;
+    if (auto* ph = getPlayHead())
+        if (auto pos = ph->getPosition())
         {
-            engine_->render(left + pos, right + pos, evPos - pos);
-            pos = evPos;
+            host.hostPlaying = pos->getIsPlaying();
+            if (auto bpm = pos->getBpm()) host.bpm = *bpm;
+            if (auto ppq = pos->getPpqPosition()) { host.ppq = *ppq; host.havePpq = true; }
         }
-        const auto m = meta.getMessage();
-        if (m.isNoteOn())
-            engine_->noteOn(m.getNoteNumber(), juce::jmax(1, (int) m.getVelocity()));
-        else if (m.isNoteOff())
-            engine_->noteOff(m.getNoteNumber());
-        else if (m.isAllNotesOff() || m.isAllSoundOff())
-            engine_->allNotesOff();
+    SeqSettings ss;
+    ss.play       = *apvts.getRawParameterValue("seq_play") > 0.5f;
+    ss.followHost = (int) *apvts.getRawParameterValue("seq_sync") == 1;
+    ss.division   = (int) *apvts.getRawParameterValue("seq_div");
+    ss.gate       = *apvts.getRawParameterValue("seq_gate");
+    ss.mute       = *apvts.getRawParameterValue("seq_mute") > 0.5f;
+    ss.recording  = seqRecording_.load();
+    const int numSeq = seq_.process(sampleRate_, numSamples, host, ss, seqEvents_, 64);
+
+    // Render in segments so every note starts at its sample-accurate position (MIDI + sequencer merged).
+    int pos = 0;
+    int si = 0;
+    auto it = midi.begin();
+    const auto itEnd = midi.end();
+    auto renderTo = [&](int p) {
+        if (p > pos) { engine_->render(left + pos, right + pos, p - pos); pos = p; }
+    };
+    while (it != itEnd || si < numSeq)
+    {
+        const int midiPos = it != itEnd ? juce::jlimit(0, numSamples, (*it).samplePosition) : std::numeric_limits<int>::max();
+        const int seqPos = si < numSeq ? seqEvents_[si].offset : std::numeric_limits<int>::max();
+        if (seqPos <= midiPos)
+        {
+            renderTo(seqPos);
+            const auto& e = seqEvents_[si++];
+            if (e.on) engine_->noteOn(e.note, e.vel, true);
+            else      engine_->noteOff(e.note, true);
+        }
+        else
+        {
+            renderTo(midiPos);
+            const auto m = (*it).getMessage();
+            ++it;
+            if (m.isNoteOn())
+            {
+                const int vel = juce::jmax(1, (int) m.getVelocity());
+                engine_->noteOn(m.getNoteNumber(), vel);
+                if (seqRecording_.load()) seq_.recordNote(m.getNoteNumber(), vel); // step-record: each played note adds a step
+            }
+            else if (m.isNoteOff())
+                engine_->noteOff(m.getNoteNumber());
+            else if (m.isAllNotesOff() || m.isAllSoundOff())
+                engine_->allNotesOff();
+        }
     }
     if (pos < numSamples)
         engine_->render(left + pos, right + pos, numSamples - pos);
@@ -146,6 +203,7 @@ juce::AudioProcessorEditor* WT8AudioProcessor::createEditor()
 
 void WT8AudioProcessor::getStateInformation(juce::MemoryBlock& destData)
 {
+    apvts.state.setProperty("sequence", juce::String(seq_.serialize()), nullptr);
     if (auto xml = apvts.copyState().createXml())
         copyXmlToBinary(*xml, destData);
 }
@@ -154,7 +212,13 @@ void WT8AudioProcessor::setStateInformation(const void* data, int sizeInBytes)
 {
     if (auto xml = getXmlFromBinary(data, sizeInBytes))
         if (xml->hasTagName(apvts.state.getType()))
+        {
             apvts.replaceState(juce::ValueTree::fromXml(*xml));
+            seq_.deserialize(apvts.state.getProperty("sequence").toString().toStdString());
+            seq_.resetTransport();
+            // Never start playing on its own just because a project was opened
+            if (auto* play = apvts.getParameter("seq_play")) play->setValueNotifyingHost(0.f);
+        }
 }
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()

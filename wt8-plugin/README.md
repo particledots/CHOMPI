@@ -13,7 +13,7 @@ in Logic** — that is the next step.
 - 8 voices: wavetable oscillator (7 tables x 33 frames) -> resonant filter -> amp envelope
 - 2 LFOs (pitch, filter), delay <-> reverb macro, compressor <-> saturation macro, pan, gain
 - Custom panel (v0.2): knobs grouped by signal flow (oscillator, envelope, filter, LFO, effects, output), value readouts, double-click a knob to reset it, double-click a readout to type a value, resizable window. All controls are automatable in Logic. No wavetable display yet.
-- Not yet: the 32-step sequencer, MIDI clock, presets (beyond Logic's own plugin presets), user wavetables.
+- Not yet: presets (beyond Logic's own plugin presets), user wavetables, a wavetable display. (MIDI clock is not needed: the sequencer follows Logic's tempo.)
 
 ## Build on your Mac (Apple silicon or Intel)
 One-time setup:
@@ -33,6 +33,16 @@ Check it: `./build/render_test wavetables build/out.wav` and `./build/plugin_tes
 Validate as an Audio Unit: `auval -v aumu Ipmo Ptdt`. Then in Logic: a Software Instrument track ->
 Instrument slot -> AU Instruments -> particledots -> ipmohc. If it doesn't show up, restart Logic
 (Logic Pro > Settings > Plug-in Manager > Reset & Rescan Selection).
+
+## Step sequencer (v0.3)
+32 steps, timed from Logic's tempo. Modelled on the CHOMPI WAVE sequencer (record notes as steps, rests, loop, gate, mute).
+- **Record:** press REC, then play notes: each note becomes the next step (with its velocity). REST adds a gap, DEL removes the last step, CLEAR empties the pattern. While REC is armed the pattern does not play.
+- **Edit:** click a step to toggle note/rest (clicking past the end extends the pattern); drag a step up/down or use the mouse wheel to change its pitch.
+- **Play:** PLAY starts it from step 1 at Logic's tempo, any time (SYNC = Free). With SYNC = Logic it plays whenever Logic's transport plays, locked to the bar position, and PLAY is greyed out. Looping/relocating in Logic restarts cleanly.
+- **STEP** = step length: 1/4, 1/8, 1/16, 1/32 and triplets (1/4T ... 1/32T). **GATE** = how much of each step the note sounds (100% = legato). **MUTE** silences it (immediately, including a sounding note).
+- Sequencer notes and played notes are separate sources, as in the firmware: you can play over the pattern.
+- The pattern is saved with the Logic project. A project never starts playing the sequencer just because it was opened (PLAY is switched off on load).
+- All sequencer settings (PLAY, SYNC, STEP, GATE, MUTE) are automatable parameters. Tests: `tests/seq_test.cpp` (exact sample timing, block-size independence, relocation, gate, mute, save/restore).
 
 ## Parameters (all map to the CHOMPI WAVE panel)
 | Parameter | Range / default | WAVE panel control |

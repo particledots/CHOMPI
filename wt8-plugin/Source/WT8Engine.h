@@ -47,8 +47,10 @@ class WT8Engine
 
     void setParams(const Params& p);
 
-    void noteOn(int midiNote, int midiVelocity /*1..127*/);
-    void noteOff(int midiNote);
+    // `fromSequencer` keeps sequencer notes separate from played ones, as in the firmware: a key is only
+    // released once both sources have let go of it.
+    void noteOn(int midiNote, int midiVelocity /*1..127*/, bool fromSequencer = false);
+    void noteOff(int midiNote, bool fromSequencer = false);
     void allNotesOff();
 
     /** Overwrites left/right with `numSamples` of stereo output. */

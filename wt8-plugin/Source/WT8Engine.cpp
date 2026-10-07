@@ -161,21 +161,22 @@ void WT8Engine::setParams(const Params& p)
         impl_->applyAll(p, false);
 }
 
-void WT8Engine::noteOn(int midiNote, int midiVelocity)
+void WT8Engine::noteOn(int midiNote, int midiVelocity, bool fromSequencer)
 {
     impl_->ensureInit();
     // The firmware maps MIDI note -> transpose_nn = note - 60 and uses vel+1 on a 1..128 scale.
     // That puts MIDI 60 at 130.81 Hz (an octave below other synths); +12 makes MIDI 60 = 261.63 Hz.
     // Note-off matches on the MIDI key, so it needs no offset.
     impl_->push(KeyRequest(KeyRequest::Type::START, (float)(midiNote - 60 + kPitchOffsetSemis), midiNote,
-                           (float)(midiVelocity + 1), KeyRequest::Source::USER));
+                           (float)(midiVelocity + 1),
+                           fromSequencer ? KeyRequest::Source::SEQUENCER : KeyRequest::Source::USER));
 }
 
-void WT8Engine::noteOff(int midiNote)
+void WT8Engine::noteOff(int midiNote, bool fromSequencer)
 {
     impl_->ensureInit();
     impl_->push(KeyRequest(KeyRequest::Type::STOP, (float)(midiNote - 60), midiNote, 127.f,
-                           KeyRequest::Source::USER));
+                           fromSequencer ? KeyRequest::Source::SEQUENCER : KeyRequest::Source::USER));
 }
 
 void WT8Engine::allNotesOff()

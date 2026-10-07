@@ -1,6 +1,8 @@
 #pragma once
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <memory>
+#include <atomic>
+#include "StepSequencer.h"
 
 class WT8Engine;
 
@@ -35,6 +37,11 @@ class WT8AudioProcessor : public juce::AudioProcessor
 
     juce::AudioProcessorValueTreeState apvts;
 
+    // Step sequencer (edited from the editor, played from the audio thread)
+    StepSequencer& sequencer() { return seq_; }
+    bool isSeqRecording() const { return seqRecording_.load(); }
+    void setSeqRecording(bool on) { seqRecording_.store(on); }
+
   private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
     void loadWavetables(WT8Engine& e);
@@ -42,6 +49,10 @@ class WT8AudioProcessor : public juce::AudioProcessor
     std::unique_ptr<WT8Engine> engine_;
     double sampleRate_ = 48000.0;
     bool engineReady_ = false;
+
+    StepSequencer seq_;
+    std::atomic<bool> seqRecording_{false};
+    SeqEvent seqEvents_[64];
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(WT8AudioProcessor)
 };
