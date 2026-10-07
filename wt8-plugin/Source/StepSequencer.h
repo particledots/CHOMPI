@@ -14,6 +14,14 @@ struct SeqStep
     uint8_t vel = 100;
     bool    rest = true;
     uint8_t prob = 100; // chance (0..100 %) that this step plays on each pass
+
+    // v0.6 per-step expression. The defaults are neutral: a step that has never been touched plays exactly as in v0.5.
+    uint8_t ratchet = 1;   // 1..8: the step is played as this many evenly spaced repeats
+    uint8_t gate = 0;      // 0 = follow the GATE knob; 5..100 = this step's own gate in % of its length (100 = legato)
+    bool    accent = false; // velocity boost by the ACCENT amount
+    uint8_t octChance = 0; // 0..100 %: chance that this step jumps by the octave(s) set with OCT JUMP
+    uint8_t condA = 1;     // trigger condition "play on pass condA of every condB passes" (1..condB of 1..8); 1 of 1 = always
+    uint8_t condB = 1;
 };
 
 struct SeqEvent
@@ -53,6 +61,11 @@ struct SeqSettings
     int   scale = -1;         // -1 = off; 0..kNumScales-1 = snap played notes to this scale (see scaleName())
     int   root = 0;           // scale root as a pitch class, 0 = C .. 11 = B
     int   transpose = 0;      // semitones added to every note BEFORE it is snapped to the scale
+
+    // v0.6. The defaults (no swing, no flagged steps) reproduce v0.5 behaviour exactly.
+    float swing = 50.f;       // 50..75 (%): MPC-style. 50 = straight, 66.7 = triplet feel, 75 = dotted. Every second step is delayed.
+    float accent = 0.3f;      // 0..1: how much velocity an accented step gets on top of its own (1 = +127, capped at 127)
+    int   octMode = 0;        // see octModeName(): which octave jump a step makes when its octave-jump roll succeeds
 };
 
 class StepSequencer
@@ -61,6 +74,7 @@ class StepSequencer
     static constexpr int kMaxSteps = 32;
     static constexpr int kNumDivisions = 8;
     static constexpr int kNumDirections = 4;
+    static constexpr int kMaxRatchet = 8;
     static double divisionQuarterNotes(int division); // 0..3 = 1/4 1/8 1/16 1/32, 4..7 = triplets
     static const char* divisionName(int division);
     static const char* directionName(int direction);
@@ -77,6 +91,21 @@ class StepSequencer
     /** What actually sounds for a stored note: transposed, kept inside 0..127, then snapped to the scale. */
     static int playedNote(int note, int transpose, int root, int scale);
 
+    // ---- v0.6: octave jumps and trigger conditions ----
+    static constexpr int kNumOctModes = 6;
+    static const char* octModeName(int mode);
+    /** Semitones to add for a successful octave-jump roll. `r` is a uniform [0,1) number used to pick up or down in the "either" modes. */
+    static int octaveShift(int mode, double r);
+    /** Trigger conditions: index 0 = always (1 of 1), then 1:2 2:2, 1:3 2:3 3:3 ... up to 8:8. */
+    static constexpr int kNumConditions = 36;
+    static void conditionFromIndex(int index, int& a, int& b);
+    static int conditionToIndex(int a, int b);
+    /** Which pass through the loop step counter `k` belongs to (0 = the first). A pass is one full trip through the loop:
+        N steps (forward, backward, random), 2N steps (pendulum with the ends repeated) or 2N-2 steps (pendulum). */
+    static long long passIndex(long long k, int loopLength, int direction, bool pendulumRepeatEnds);
+    /** True when "pass a of every b" lets the step play on pass `pass`. */
+    static bool conditionPasses(int a, int b, long long pass);
+
     /** Which pattern step plays at absolute step counter `k` (0 = bar start / first step). Pure function: the same
         inputs always give the same step, so playback does not depend on how the host chops audio into blocks. */
     static int stepIndexFor(long long k, int loopLength, int direction, bool pendulumRepeatEnds, uint64_t randomKey);
@@ -91,6 +120,12 @@ class StepSequencer
     void addRest();
     void setNote(int index, int note);   // keeps rest/velocity; does nothing past the end
     void setProb(int index, int percent); // 0..100; does nothing past the end or on a rest
+    // v0.6 per-step values. Like setProb, all of these do nothing past the end of the pattern or on a rest.
+    void setRatchet(int index, int repeats);        // 1..8
+    void setStepGate(int index, int percent);       // 0 = follow the GATE knob, otherwise 5..100
+    void toggleAccent(int index);
+    void setOctChance(int index, int percent);      // 0..100
+    void setCondition(int index, int a, int b);     // "pass a of every b": b 1..8, a 1..b
     void toggleRest(int index);          // rest <-> note; past the end extends the pattern
     std::string serialize() const;
     void deserialize(const std::string& text);
@@ -118,6 +153,14 @@ class StepSequencer
     bool   held_ = false;
     int    heldNote_ = 60;
     double gateOffPpq_ = -1.0;
+    // v0.6 ratchets: the repeats of the current step that have not started yet (repeat 0 is the step's own start)
+    double ratBase_ = 0.0;   // host position (quarter notes) where the step started
+    double ratSub_ = 0.0;    // length of one repeat
+    double ratGate_ = 1.0;   // gate of each repeat as a fraction of its length (>= 0.999: legato)
+    int    ratNext_ = 0;     // next repeat to start; none left when ratNext_ >= ratTotal_
+    int    ratTotal_ = 0;
+    int    ratVel_ = 100;
+    int    ratNote_ = 60;
     std::atomic<int> displayIdx_{-1};
     std::atomic<bool> running_{false};
 

@@ -81,6 +81,14 @@ juce::AudioProcessorValueTreeState::ParameterLayout WT8AudioProcessor::createLay
     l.add(c("seq_scale", "Seq Scale", scales, 0, 3));      // item 0 = Off, item n = scale n-1 of the Scripter list
     l.add(c("seq_root", "Seq Scale Root", roots, 0, 3));
     l.add(b("seq_xpose", "Seq MIDI Transpose", false, 3)); // keys played in set the pattern transpose (C3 = none)
+
+    // v0.6 per-step expression settings. Version hint 4: added after v0.5 shipped. (The per-step values themselves
+    // - ratchet, step gate, accent, octave-jump chance, trigger condition - live in the saved pattern, not here.)
+    juce::StringArray octModes;
+    for (int m = 0; m < StepSequencer::kNumOctModes; ++m) octModes.add(StepSequencer::octModeName(m));
+    l.add(f("seq_swing", "Seq Swing", 50.f, 75.f, 50.f, 4));    // 50 = straight, 66.7 = triplet feel, 75 = dotted
+    l.add(f("seq_accent", "Seq Accent", 0.f, 1.f, 0.3f, 4));    // velocity added to accented steps (1 = +127)
+    l.add(c("seq_octmode", "Seq Octave Jump", octModes, 0, 4)); // which jump a step makes when its octave-jump roll succeeds
     return l;
 }
 
@@ -183,7 +191,10 @@ void WT8AudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
     ss.scale      = (int) *apvts.getRawParameterValue("seq_scale") - 1; // choice 0 = Off -> -1
     ss.root       = (int) *apvts.getRawParameterValue("seq_root");
     ss.transpose  = xposeOn ? seqTranspose_.load() : 0;                 // switched off = the pattern plays as recorded
-    const int numSeq = seq_.process(sampleRate_, numSamples, host, ss, seqEvents_, 64);
+    ss.swing      = *apvts.getRawParameterValue("seq_swing");
+    ss.accent     = *apvts.getRawParameterValue("seq_accent");
+    ss.octMode    = (int) *apvts.getRawParameterValue("seq_octmode");
+    const int numSeq = seq_.process(sampleRate_, numSamples, host, ss, seqEvents_, kSeqEventCapacity);
 
     // Render in segments so every note starts at its sample-accurate position (MIDI + sequencer merged).
     int pos = 0;

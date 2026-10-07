@@ -3,10 +3,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cmath>
+#include <random>
 #include <string>
 #include <vector>
 
-struct Ev { long long pos; bool on; int note; };
+struct Ev { long long pos; bool on; int note; int vel = 0; };
 static int failures = 0;
 #define CHECK(cond, ...) do { if (!(cond)) { ++failures; printf("  FAIL: "); printf(__VA_ARGS__); printf("\n"); } } while (0)
 
@@ -20,7 +21,7 @@ static void fill(StepSequencer& s, std::initializer_list<int> notes) // -1 = res
 static std::vector<Ev> run(StepSequencer& s, SeqSettings st, double bpm, double sr, int block, long long total,
                            bool follow, double startPpq = 0.0, std::vector<std::pair<long long, double>> jumps = {})
 {
-    std::vector<Ev> evs; SeqEvent buf[64];
+    std::vector<Ev> evs; static SeqEvent buf[1024];
     double ppq = startPpq; const double pps = bpm / 60.0 / sr;
     st.followHost = follow;
     for (long long t = 0; t < total; t += block)
@@ -28,8 +29,8 @@ static std::vector<Ev> run(StepSequencer& s, SeqSettings st, double bpm, double 
         const int n = (int) std::min<long long>(block, total - t);
         for (auto& j : jumps) if (j.first == t) ppq = j.second;
         SeqHostInfo h; h.hostPlaying = true; h.havePpq = true; h.ppq = ppq; h.bpm = bpm;
-        const int c = s.process(sr, n, h, st, buf, 64);
-        for (int i = 0; i < c; ++i) evs.push_back({t + buf[i].offset, buf[i].on, buf[i].note});
+        const int c = s.process(sr, n, h, st, buf, 1024);
+        for (int i = 0; i < c; ++i) evs.push_back({t + buf[i].offset, buf[i].on, buf[i].note, buf[i].vel});
         ppq += n * pps;
     }
     return evs;
@@ -374,6 +375,314 @@ int main()
         SeqSettings stop = d; stop.play = false; s.process(sr, 512, h, stop, buf, 64); CHECK(!s.isRunning(), "PLAY off: not running");
         SeqSettings f = d; f.followHost = true; f.play = false; h.hostPlaying = false; s.process(sr, 512, h, f, buf, 64); CHECK(!s.isRunning(), "Logic sync, host stopped");
         h.hostPlaying = true; s.process(sr, 512, h, f, buf, 64); CHECK(s.isRunning(), "Logic sync, host playing");
+    }
+
+
+    // ================================ v0.6: per-step expression, swing ================================
+    auto sameNear = [](const std::vector<Ev>& a, const std::vector<Ev>& b, long long tol = 1) {
+        if (a.size() != b.size()) return false;
+        for (size_t i = 0; i < a.size(); ++i)
+            if (std::llabs(a[i].pos - b[i].pos) > tol || a[i].on != b[i].on || a[i].note != b[i].note || a[i].vel != b[i].vel) return false;
+        return true;
+    };
+    auto posOf = [](const std::vector<Ev>& e, bool on) { std::vector<long long> v; for (auto& x : e) if (x.on == on) v.push_back(x.pos); return v; };
+    auto nearVec = [](const std::vector<long long>& got, const std::vector<long long>& want, long long tol = 1) {
+        if (got.size() != want.size()) return false;
+        for (size_t i = 0; i < got.size(); ++i) if (std::llabs(got[i] - want[i]) > tol) return false;
+        return true;
+    };
+    auto velsOf = [](const std::vector<Ev>& e) { std::vector<int> v; for (auto& x : e) if (x.on) v.push_back(x.vel); return v; };
+    auto offsMatchOns = [](const std::vector<Ev>& e) { bool ok = !e.empty(); int last = -1; for (auto& x : e) { if (x.on) last = x.note; else ok = ok && x.note == last; } return ok; };
+
+    printf("T20 v0.6 per-step values: save format, rests keep them, old patterns, clamping, editing, condition list\n");
+    {
+        StepSequencer s; s.recordNote(60, 100);
+        CHECK(s.serialize() == "60:100", "untouched step saves as before ('%s')", s.serialize().c_str());
+        s.setRatchet(0, 3); s.setStepGate(0, 50); s.toggleAccent(0); s.setOctChance(0, 30); s.setCondition(0, 2, 3);
+        CHECK(s.serialize() == "60:100:x3:g50:a:o30:c2/3", "serialized '%s'", s.serialize().c_str());
+        s.setProb(0, 75);
+        CHECK(s.serialize() == "60:100:75:x3:g50:a:o30:c2/3", "with probability '%s'", s.serialize().c_str());
+        StepSequencer r; r.deserialize(s.serialize()); CHECK(r.serialize() == s.serialize(), "round trip '%s'", r.serialize().c_str());
+        SeqStep stp[32]; int len, idx; r.snapshot(stp, len, idx);
+        CHECK(len == 1 && stp[0].note == 60 && stp[0].vel == 100 && stp[0].prob == 75 && stp[0].ratchet == 3 && stp[0].gate == 50 && stp[0].accent
+              && stp[0].octChance == 30 && stp[0].condA == 2 && stp[0].condB == 3, "all fields restored");
+        s.toggleRest(0);
+        CHECK(s.serialize() == "r:75:x3:g50:a:o30:c2/3", "a rest keeps its values ('%s')", s.serialize().c_str());
+        StepSequencer r2; r2.deserialize(s.serialize()); CHECK(r2.serialize() == s.serialize(), "rest with values round trip");
+        s.toggleRest(0); CHECK(s.serialize() == "60:100:75:x3:g50:a:o30:c2/3", "note -> rest -> note keeps the values");
+        StepSequencer q; q.recordNote(60, 100); q.addRest(); q.recordNote(64, 100);
+        q.setRatchet(1, 4); q.setStepGate(1, 50); q.toggleAccent(1); q.setOctChance(1, 50); q.setCondition(1, 2, 4); // on a rest
+        q.setRatchet(7, 4); q.setStepGate(-1, 50); q.toggleAccent(99); q.setOctChance(40, 50); q.setCondition(-3, 2, 4); // out of range
+        CHECK(q.serialize() == "60:100,r,64:100", "setters ignore rests and out-of-range steps ('%s')", q.serialize().c_str());
+        StepSequencer c;
+        c.deserialize("60:100:x99,61:100:g2,62:100:g0,63:100:o250,64:100:c9/3,65:100:c2/20,66:100:c0/0,67:100:z7:x2,68:100:x");
+        CHECK(c.serialize() == "60:100:x8,61:100:g5,62:100,63:100:o100,64:100:c3/3,65:100:c2/8,66:100,67:100:x2,68:100", "clamping on load: '%s'", c.serialize().c_str());
+        StepSequencer v; v.deserialize("60:100:75,r:50,67:80,64"); // patterns from v0.3 / v0.4 / v0.5 have none of the new fields
+        v.snapshot(stp, len, idx);
+        bool plain = len == 4; for (int i = 0; i < 4; ++i) plain = plain && stp[i].ratchet == 1 && stp[i].gate == 0 && !stp[i].accent && stp[i].octChance == 0 && stp[i].condA == 1 && stp[i].condB == 1;
+        CHECK(plain && v.serialize() == "60:100:75,r:50,67:80,64:100", "old patterns load with neutral v0.6 values ('%s')", v.serialize().c_str());
+        StepSequencer t; t.recordNote(60, 100); t.setRatchet(0, 5); t.setStepGate(0, 2); t.deleteLast(); t.recordNote(61, 90); t.snapshot(stp, len, idx);
+        CHECK(stp[0].ratchet == 1 && stp[0].gate == 0, "a fresh step starts neutral");
+        t.setRatchet(0, 99); t.snapshot(stp, len, idx); CHECK(stp[0].ratchet == 8, "setRatchet clamps high");
+        t.setRatchet(0, -2); t.snapshot(stp, len, idx); CHECK(stp[0].ratchet == 1, "setRatchet clamps low");
+        t.setStepGate(0, 3); t.snapshot(stp, len, idx); CHECK(stp[0].gate == 5, "a step gate below 5 becomes 5");
+        t.setStepGate(0, 0); t.snapshot(stp, len, idx); CHECK(stp[0].gate == 0, "0 = follow the GATE knob");
+
+        const int expA[] = {1, 1, 2, 1, 2, 3, 1, 2, 3, 4}, expB[] = {1, 2, 2, 3, 3, 3, 4, 4, 4, 4};
+        for (int i = 0; i < 10; ++i) { int a, b; StepSequencer::conditionFromIndex(i, a, b); CHECK(a == expA[i] && b == expB[i], "condition %d is %d:%d, got %d:%d", i, expA[i], expB[i], a, b); }
+        { int a, b; StepSequencer::conditionFromIndex(35, a, b); CHECK(a == 8 && b == 8, "last condition 8:8");
+          StepSequencer::conditionFromIndex(28, a, b); CHECK(a == 1 && b == 8, "condition 28 is 1:8");
+          StepSequencer::conditionFromIndex(-4, a, b); CHECK(a == 1 && b == 1, "below the list = always");
+          StepSequencer::conditionFromIndex(99, a, b); CHECK(a == 8 && b == 8, "above the list = last"); }
+        for (int i = 0; i < StepSequencer::kNumConditions; ++i)
+        { int a, b; StepSequencer::conditionFromIndex(i, a, b); CHECK(a >= 1 && a <= b && b <= 8 && StepSequencer::conditionToIndex(a, b) == i, "condition index %d round trip", i); }
+        CHECK(StepSequencer::kNumConditions == 36 && StepSequencer::conditionToIndex(5, 3) == StepSequencer::conditionToIndex(3, 3) && StepSequencer::conditionToIndex(1, 1) == 0, "index helpers clamp");
+        CHECK(StepSequencer::passIndex(-1, 4, 0, false) == -1 && StepSequencer::passIndex(-4, 4, 0, false) == -1 && StepSequencer::passIndex(-5, 4, 0, false) == -2
+              && StepSequencer::passIndex(0, 4, 0, false) == 0 && StepSequencer::passIndex(3, 4, 1, false) == 0 && StepSequencer::passIndex(4, 4, 3, false) == 1, "pass index (forward/backward/random, negative counters)");
+        CHECK(StepSequencer::passIndex(5, 4, 2, false) == 0 && StepSequencer::passIndex(6, 4, 2, false) == 1 && StepSequencer::passIndex(7, 4, 2, true) == 0
+              && StepSequencer::passIndex(8, 4, 2, true) == 1 && StepSequencer::passIndex(5, 1, 2, false) == 5 && StepSequencer::passIndex(3, 2, 2, false) == 1, "pass index (pendulum periods 2N-2 and 2N)");
+        CHECK(StepSequencer::conditionPasses(1, 3, 0) && StepSequencer::conditionPasses(1, 3, 3) && StepSequencer::conditionPasses(2, 3, 1) && StepSequencer::conditionPasses(3, 3, 2)
+              && !StepSequencer::conditionPasses(1, 3, 1) && !StepSequencer::conditionPasses(2, 3, 0) && StepSequencer::conditionPasses(1, 1, 7) && StepSequencer::conditionPasses(1, 3, -3)
+              && StepSequencer::conditionPasses(2, 3, -2), "condition logic");
+        CHECK(StepSequencer::octaveShift(0, 0.9) == 12 && StepSequencer::octaveShift(1, 0.1) == -12 && StepSequencer::octaveShift(2, 0.2) == 12 && StepSequencer::octaveShift(2, 0.7) == -12
+              && StepSequencer::octaveShift(3, 0.5) == 24 && StepSequencer::octaveShift(4, 0.5) == -24 && StepSequencer::octaveShift(5, 0.1) == 24 && StepSequencer::octaveShift(5, 0.9) == -24
+              && std::string(StepSequencer::octModeName(0)) == "Up 1 octave" && std::string(StepSequencer::octModeName(5)) == "Up or down 2 octaves", "octave shift modes");
+    }
+
+    printf("T21 ratchets: repeat spacing and gates, block-size independence, cancelled by mute / record / stop, with swing\n");
+    {
+        SeqSettings d = st; // 1/16 = 6000 samples, gate 50 %
+        { StepSequencer a; fill(a, {60}); a.setRatchet(0, 3);
+          const auto e = run(a, d, bpm, sr, 512, 2 * step16, false);
+          CHECK(nearVec(posOf(e, true), {0, 2000, 4000, 6000, 8000, 10000}), "ratchet 3: note-ons every 2000 samples");
+          CHECK(nearVec(posOf(e, false), {1000, 3000, 5000, 7000, 9000, 11000}), "ratchet 3: each repeat is gated to 50 %% of its own length");
+          CHECK(offsMatchOns(e), "note-offs carry the note that sounded"); }
+        { StepSequencer a; fill(a, {60}); a.setRatchet(0, 8);
+          const auto e = run(a, d, bpm, sr, 512, step16, false);
+          CHECK(countOn(e) == 8 && nearVec(posOf(e, true), {0, 750, 1500, 2250, 3000, 3750, 4500, 5250}), "ratchet 8: eight repeats 750 samples apart"); }
+        { SeqSettings leg = d; leg.gate = 1.f; StepSequencer a; fill(a, {60}); a.setRatchet(0, 3);
+          const auto e = run(a, leg, bpm, sr, 512, 2 * step16, false);
+          CHECK(nearVec(posOf(e, true), {0, 2000, 4000, 6000, 8000, 10000}) && nearVec(posOf(e, false), {2000, 4000, 6000, 8000, 10000}), "legato ratchet: each repeat ends exactly where the next begins");
+          bool paired = true; for (size_t i = 0; i + 1 < e.size(); ++i) if (!e[i].on) paired = paired && e[i + 1].on && e[i].pos == e[i + 1].pos;
+          CHECK(paired, "legato ratchet: off and next on on the same sample"); }
+        { // a mixed pattern gives the same events at any block size, including blocks that cut a ratchet in half
+          auto mk = [&](StepSequencer& q) { fill(q, {60, 62, -1, 65, 67, 69}); q.setRatchet(0, 3); q.setRatchet(1, 2); q.setRatchet(3, 4); q.setRatchet(5, 8); q.setStepGate(3, 90); };
+          StepSequencer r0; mk(r0); const auto ref = run(r0, d, bpm, sr, 512, 24 * step16, false);
+          for (int bs : {64, 997, 1500, 4096, 24000})
+          { StepSequencer q; mk(q); const auto e = run(q, d, bpm, sr, bs, 24 * step16, false); CHECK(!ref.empty() && sameNear(ref, e), "ratchets at block size %d differ (%zu vs %zu events)", bs, ref.size(), e.size()); } }
+        { StepSequencer a; fill(a, {60}); a.setRatchet(0, 4); a.setProb(0, 0);
+          CHECK(run(a, d, bpm, sr, 512, 8 * step16, false).empty(), "a step that misses its roll makes no repeats either"); }
+        { StepSequencer q; fill(q, {60}); q.setRatchet(0, 4); SeqEvent buf[64]; SeqHostInfo h; h.hostPlaying = true; h.havePpq = true; h.bpm = bpm;
+          SeqSettings m = d; int c = q.process(sr, 2000, h, m, buf, 64); // on@0 off@750 on@1500
+          CHECK(c == 3 && buf[0].on && !buf[1].on && buf[2].on && buf[2].offset == 1500, "start of a ratcheted step (%d events)", c);
+          m.mute = true; c = q.process(sr, 6000, h, m, buf, 64);
+          CHECK(c == 1 && !buf[0].on && buf[0].offset == 0, "MUTE releases the sounding repeat and cancels the rest of the ratchet (%d events)", c);
+          StepSequencer q2; fill(q2, {60}); q2.setRatchet(0, 4); c = q2.process(sr, 2000, h, d, buf, 64); SeqSettings rc = d; rc.recording = true;
+          c = q2.process(sr, 6000, h, rc, buf, 64); CHECK(c == 1 && !buf[0].on, "record armed cancels the ratchet (%d events)", c);
+          StepSequencer q3; fill(q3, {60}); q3.setRatchet(0, 4); c = q3.process(sr, 2000, h, d, buf, 64); SeqSettings sp = d; sp.play = false;
+          c = q3.process(sr, 6000, h, sp, buf, 64); CHECK(c == 1 && !buf[0].on, "stopping cancels the ratchet (%d events)", c);
+          StepSequencer q4; fill(q4, {60}); q4.setRatchet(0, 4); c = q4.process(sr, 2000, h, d, buf, 64); q4.resetTransport();
+          c = q4.process(sr, 1000, h, d, buf, 64); int ons = 0; for (int i = 0; i < c; ++i) ons += buf[i].on; CHECK(ons == 1 && buf[0].offset == 0, "after a transport reset the pattern starts again at step 1 (%d ons)", ons); }
+        { // with swing: a step lasts until the next one starts, and its repeats are spread over that time
+          SeqSettings w = d; w.swing = 50.f + 50.f / 3.f; StepSequencer a; fill(a, {60, 62}); a.setRatchet(0, 2);
+          const auto e = run(a, w, bpm, sr, 512, 16000, false);
+          CHECK(nearVec(posOf(e, true), {0, 4000, 8000, 12000}) && nearVec(posOf(e, false), {2000, 6000, 10000, 14000}), "ratchet inside a swung step (step 1 starts at 8000)");
+          CHECK(onNotes(e) == std::vector<int>({60, 60, 62, 60}), "ratchet repeats keep the step's note"); }
+    }
+
+    printf("T22 swing: odd steps start late (50 %% straight, 66.7 %% triplet, 75 %% dotted), every step plays once, block-size independent, bar-locked\n");
+    {
+        auto pat = [&](StepSequencer& q) { fill(q, {60, 62, 64, 65}); };
+        SeqSettings d = st;
+        { StepSequencer a, b; pat(a); pat(b); SeqSettings w = d; w.swing = 50.f;
+          CHECK(sameEvents(run(a, d, bpm, sr, 512, 16 * step16, false), run(b, w, bpm, sr, 512, 16 * step16, false)), "swing 50 %% = no swing"); }
+        { StepSequencer a; pat(a); SeqSettings w = d; w.swing = 50.f + 50.f / 3.f;
+          const auto e = run(a, w, bpm, sr, 512, 8 * step16, false);
+          CHECK(nearVec(posOf(e, true), {0, 8000, 12000, 20000, 24000, 32000, 36000, 44000}), "66.7 %%: odd steps 2000 samples late");
+          CHECK(nearVec(posOf(e, false), {4000, 10000, 16000, 22000, 28000, 34000, 40000, 46000}), "gate 50 %% of each step's real length (8000 for even steps, 4000 for odd)");
+          CHECK(onNotes(e) == std::vector<int>({60, 62, 64, 65, 60, 62, 64, 65}), "swing keeps the order"); }
+        { StepSequencer a; pat(a); SeqSettings w = d; w.swing = 75.f;
+          CHECK(nearVec(posOf(run(a, w, bpm, sr, 512, 4 * step16, false), true), {0, 9000, 12000, 21000}), "75 %%: odd steps 3000 samples (half a step) late"); }
+        { StepSequencer a; pat(a); SeqSettings w = d; w.swing = 99.f; // out of range is limited to 75
+          CHECK(nearVec(posOf(run(a, w, bpm, sr, 512, 2 * step16, false), true), {0, 9000}), "swing above 75 %% is limited to 75 %%"); }
+        { StepSequencer a; pat(a); SeqSettings w = d; w.swing = 66.f; w.gate = 1.f; // legato: each note runs into the next
+          const auto e = run(a, w, bpm, sr, 512, 8 * step16, false); bool paired = true;
+          for (size_t i = 0; i + 1 < e.size(); ++i) if (!e[i].on) paired = paired && e[i + 1].on && e[i].pos == e[i + 1].pos;
+          CHECK(paired && countOn(e) == 8, "legato with swing: still off-then-on on the same sample"); }
+        { SeqSettings w = d; w.swing = 62.f; w.division = 6; // triplet steps too
+          StepSequencer r0; pat(r0); const auto ref = run(r0, w, bpm, sr, 512, 96000, false);
+          CHECK(countOn(ref) == 24, "1/16T at 120 bpm: 24 steps in 96000 samples, each exactly once (%d)", countOn(ref));
+          for (int bs : {64, 333, 997, 4096}) { StepSequencer q; pat(q); const auto e = run(q, w, bpm, sr, bs, 96000, false); CHECK(sameNear(ref, e), "swing at block size %d differs", bs); } }
+        { // every step plays exactly once even when a delayed step lands in a later block than its nominal time
+          SeqSettings w = d; w.swing = 75.f; StepSequencer q; fill(q, {60}); const auto e = run(q, w, bpm, sr, 3001, 64 * step16, false);
+          CHECK(countOn(e) == 64, "64 steps at 75 %% swing in odd-sized blocks: %d note-ons", countOn(e)); }
+        { // Logic sync: starting part-way through the delayed region still plays the step that is waiting
+          SeqSettings w = d; w.followHost = true; w.play = false; w.swing = 50.f + 50.f / 3.f; StepSequencer q; pat(q);
+          const auto e = run(q, w, bpm, sr, 512, 12000, true, 0.26); // step 1 is nominally at 0.25 quarter notes, really at 0.3333
+          CHECK(!e.empty() && e[0].on && e[0].note == 62 && near(e[0].pos, 1760, 2), "first note is the waiting step 2 at ~1760 (got note %d at %lld)", e.empty() ? -1 : e[0].note, e.empty() ? -1 : e[0].pos);
+          StepSequencer a, b; pat(a); pat(b);
+          const auto full = run(a, w, bpm, sr, 512, 16 * 24000, true, 0.0), late = run(b, w, bpm, sr, 700, 12 * 24000, true, 4.0);
+          std::vector<Ev> ref; for (auto& x : full) if (x.pos >= 96000) ref.push_back({x.pos - 96000, x.on, x.note, x.vel});
+          CHECK(!ref.empty() && sameNear(ref, late), "Logic sync with swing depends only on the host position (%zu vs %zu events)", ref.size(), late.size()); }
+    }
+
+    printf("T23 per-step gate: its own length, 100 = legato, 0 = follow the GATE knob\n");
+    {
+        StepSequencer a; fill(a, {60, 62, 64}); a.setStepGate(1, 100); a.setStepGate(2, 25);
+        auto e = run(a, st, bpm, sr, 512, 3 * step16, false);
+        CHECK(nearVec(posOf(e, true), {0, 6000, 12000}) && nearVec(posOf(e, false), {3000, 12000, 13500}), "knob 50 %%, step 2 legato, step 3 at 25 %% (offs at 3000, 12000, 13500)");
+        StepSequencer b; fill(b, {60, 62, 64}); b.setStepGate(2, 25);
+        CHECK(nearVec(posOf(run(b, st, bpm, sr, 512, 3 * step16, false), false), {3000, 9000, 13500}), "step 2 follows the GATE knob again once its own gate is cleared");
+        StepSequencer c; fill(c, {60, 62}); c.setStepGate(0, 80); SeqSettings g = st; g.gate = 0.2f;
+        CHECK(nearVec(posOf(run(c, g, bpm, sr, 512, 2 * step16, false), false), {4800, 7200}), "a step's gate can be longer than the knob (80 %% vs 20 %%)");
+    }
+
+    printf("T24 accent: velocity boost by the ACCENT amount, capped at 127, all ratchet repeats\n");
+    {
+        StepSequencer a; a.recordNote(60, 64); a.recordNote(62, 64); a.toggleAccent(1);
+        SeqSettings d = st; d.accent = 0.3f;
+        CHECK(velsOf(run(a, d, bpm, sr, 512, 4 * step16, false)) == std::vector<int>({64, 102, 64, 102}), "64 + 0.3 x 127 = 102 on the accented step only");
+        d.accent = 0.f; CHECK(velsOf(run(a, d, bpm, sr, 512, 2 * step16, false)) == std::vector<int>({64, 64}), "accent amount 0 = no change");
+        d.accent = 0.5f; CHECK(velsOf(run(a, d, bpm, sr, 512, 2 * step16, false)) == std::vector<int>({64, 127}), "capped at 127");
+        d.accent = 5.f; CHECK(velsOf(run(a, d, bpm, sr, 512, 2 * step16, false)) == std::vector<int>({64, 127}), "amount above 1 is limited to 1");
+        a.toggleAccent(1); d.accent = 0.3f; CHECK(velsOf(run(a, d, bpm, sr, 512, 2 * step16, false)) == std::vector<int>({64, 64}), "accent can be toggled off again");
+        StepSequencer r; r.recordNote(60, 64); r.toggleAccent(0); r.setRatchet(0, 3);
+        CHECK(velsOf(run(r, d, bpm, sr, 512, step16, false)) == std::vector<int>({102, 102, 102}), "every repeat of an accented ratchet is accented");
+    }
+
+    printf("T25 octave jump: chance per step, direction modes, seeds, interplay with transpose / scale / clamping\n");
+    {
+        SeqSettings d = st; d.seed = 7;
+        auto playOne = [&](int note, int chance, SeqSettings x, int steps) {
+            StepSequencer q; q.recordNote(note, 100); q.setOctChance(0, chance); return run(q, x, bpm, sr, 4096, (long long) steps * step16, false);
+        };
+        CHECK(onNotes(playOne(60, 0, d, 50)) == std::vector<int>(50, 60), "chance 0: never jumps");
+        { const int modes[] = {0, 1, 3, 4}, want[] = {72, 48, 84, 36};
+          for (int i = 0; i < 4; ++i) { SeqSettings x = d; x.octMode = modes[i]; CHECK(onNotes(playOne(60, 100, x, 20)) == std::vector<int>(20, want[i]), "mode %d at chance 100 -> %d", modes[i], want[i]); } }
+        { SeqSettings x = d; x.octMode = 2; const auto n = onNotes(playOne(60, 100, x, 1000)); int up = 0, dn = 0, other = 0;
+          for (int v : n) { if (v == 72) ++up; else if (v == 48) ++dn; else ++other; }
+          CHECK(other == 0 && up > 420 && up < 580 && dn > 420 && dn < 580, "up-or-down mode: %d up, %d down, %d other of 1000", up, dn, other); }
+        { SeqSettings x = d; x.octMode = 5; const auto n = onNotes(playOne(60, 100, x, 400)); int up = 0, dn = 0, other = 0;
+          for (int v : n) { if (v == 84) ++up; else if (v == 36) ++dn; else ++other; }
+          CHECK(other == 0 && up > 150 && dn > 150, "up-or-down 2 octaves: %d up, %d down, %d other", up, dn, other); }
+        { SeqSettings x = d; x.octMode = 0; const auto n = onNotes(playOne(60, 40, x, 2000)); int jumped = 0; for (int v : n) jumped += v == 72;
+          CHECK(jumped > 700 && jumped < 900 && (int) n.size() == 2000, "chance 40 %%: %d of 2000 jumped", jumped); }
+        { SeqSettings x = d; x.octMode = 0; const auto e = playOne(60, 50, x, 40); CHECK(offsMatchOns(e), "note-offs use the note that sounded (octave-jumped)"); }
+        // the same choices every time with a fixed seed (any block size), different with another seed
+        { SeqSettings x = d; x.octMode = 2; auto mk = [&](StepSequencer& q) { fill(q, {60, 62, 64, 65}); for (int i = 0; i < 4; ++i) q.setOctChance(i, 50); };
+          StepSequencer a, b, c; mk(a); mk(b); mk(c); SeqSettings y = x; y.seed = 8;
+          const auto ea = run(a, x, bpm, sr, 64, 400 * step16, false), eb = run(b, x, bpm, sr, 997, 400 * step16, false), ec = run(c, y, bpm, sr, 512, 400 * step16, false);
+          CHECK(sameNear(ea, eb) && !sameNear(ea, ec), "fixed seed repeats the octave choices at any block size; another seed differs"); }
+        // the octave jump leaves the pitch class alone, so a scale still fits; transpose is added; the keyboard ends clamp
+        { SeqSettings x = d; x.octMode = 0; x.scale = kCMaj; x.root = kC;
+          CHECK(onNotes(playOne(61, 100, x, 3)) == std::vector<int>(3, 72), "stored 61 + octave up in C major -> 72 (61 snaps to 60)"); }
+        { SeqSettings x = d; x.octMode = 0; x.transpose = 2; CHECK(onNotes(playOne(60, 100, x, 3)) == std::vector<int>(3, 74), "transpose +2 and an octave up = 74"); }
+        { SeqSettings x = d; x.octMode = 3; CHECK(onNotes(playOne(120, 100, x, 3)) == std::vector<int>(3, 127), "stored 120 + 2 octaves is kept at 127");
+          x.octMode = 4; CHECK(onNotes(playOne(10, 100, x, 3)) == std::vector<int>(3, 0), "stored 10 - 2 octaves is kept at 0"); }
+        { StepSequencer s; fill(s, {60, 62}); s.setOctChance(0, 100); const std::string before = s.serialize();
+          SeqSettings x = d; run(s, x, bpm, sr, 512, 8 * step16, false);
+          CHECK(s.serialize() == before, "playing does not change the stored pattern"); }
+    }
+
+    printf("T26 trigger conditions: pass a of every b, loop / pendulum passes, a step that is not due acts like a rest, bar-locked\n");
+    {
+        SeqSettings d = st;
+        const long long pass4 = 4 * step16;
+        { StepSequencer a; fill(a, {60, 62, 64, 65}); a.setCondition(0, 1, 3);
+          const auto e = run(a, d, bpm, sr, 512, 12 * pass4, false);
+          std::vector<long long> p60; for (auto& x : e) if (x.on && x.note == 60) p60.push_back(x.pos);
+          CHECK(nearVec(p60, {0, 3 * pass4, 6 * pass4, 9 * pass4}), "1 of 3: plays on passes 1, 4, 7, 10 (%zu plays)", p60.size());
+          CHECK(countOn(e, 62) == 12 && countOn(e, 64) == 12 && countOn(e, 65) == 12, "steps without a condition play every pass"); }
+        { StepSequencer a; fill(a, {60, 62, 64, 65}); a.setCondition(0, 2, 3);
+          std::vector<long long> p60; for (auto& x : run(a, d, bpm, sr, 512, 12 * pass4, false)) if (x.on && x.note == 60) p60.push_back(x.pos);
+          CHECK(nearVec(p60, {pass4, 4 * pass4, 7 * pass4, 10 * pass4}), "2 of 3: passes 2, 5, 8, 11"); }
+        { StepSequencer a; fill(a, {60, 62, 64, 65}); a.setCondition(0, 3, 3);
+          std::vector<long long> p60; for (auto& x : run(a, d, bpm, sr, 512, 12 * pass4, false)) if (x.on && x.note == 60) p60.push_back(x.pos);
+          CHECK(nearVec(p60, {2 * pass4, 5 * pass4, 8 * pass4, 11 * pass4}), "3 of 3: passes 3, 6, 9, 12"); }
+        { StepSequencer a; fill(a, {60, 62, 64, 65}); a.setCondition(1, 2, 2); a.setCondition(2, 1, 2); // 62 on odd passes, 64 on even
+          const auto e = run(a, d, bpm, sr, 512, 8 * pass4, false);
+          CHECK(countOn(e, 62) == 4 && countOn(e, 64) == 4 && countOn(e, 60) == 8, "alternating steps 1:2 / 2:2"); }
+        { StepSequencer a; fill(a, {60, 62}); a.setCondition(1, 2, 2); SeqSettings g = d; g.gate = 1.f; // pass 1: step 2 is not due
+          const auto e = run(a, g, bpm, sr, 512, 2 * 2 * step16, false);
+          CHECK(onNotes(e) == std::vector<int>({60, 60, 62}) && nearVec(posOf(e, false), {6000, 18000}), "a step that is not due is a rest: the previous note still ends on time"); }
+        { StepSequencer a; fill(a, {60, 62, 64, 65}); a.setCondition(0, 1, 2); SeqSettings l = d; l.loopLen = 2; // passes of 2 steps
+          std::vector<long long> p60; for (auto& x : run(a, l, bpm, sr, 512, 8 * 2 * step16, false)) if (x.on && x.note == 60) p60.push_back(x.pos);
+          CHECK(nearVec(p60, {0, 4 * step16, 8 * step16, 12 * step16}), "loop of 2: a pass is 2 steps, so 1 of 2 plays every second trip"); }
+        { StepSequencer a; fill(a, {60, 62, 64, 65}); a.setCondition(3, 1, 2); SeqSettings p = d; p.direction = 2; // pendulum, a pass = 6 steps; step 4 is the turning point
+          std::vector<long long> p65; for (auto& x : run(a, p, bpm, sr, 512, 24 * step16, false)) if (x.on && x.note == 65) p65.push_back(x.pos);
+          CHECK(nearVec(p65, {3 * step16, 15 * step16}), "pendulum: passes of 6 steps (the turning point is in steps 4, 10, 16, 22 and only the 1st and 3rd pass play it)"); }
+        { StepSequencer a; fill(a, {60, 62, 64, 65}); a.setCondition(3, 1, 2); SeqSettings p = d; p.direction = 2; p.pendRepeat = true; // ends repeated: a pass = 8 steps, step 4 plays twice per pass
+          const auto e = run(a, p, bpm, sr, 512, 32 * step16, false);
+          CHECK(countOn(e, 65) == 4, "pendulum with the ends repeated: passes of 8 steps (%d plays of the end step in 4 passes, want 4: 2 per due pass)", countOn(e, 65)); }
+        { // a condition together with probability: only the due passes roll
+          StepSequencer a; fill(a, {60, 62, 64, 65}); a.setCondition(0, 1, 2); a.setProb(0, 50); SeqSettings x = d; x.seed = 3;
+          const int n = countOn(run(a, x, bpm, sr, 4096, 1600 * step16, false), 60);
+          CHECK(n > 70 && n < 130, "1 of 2 with 50 %%: %d plays in 400 passes (want about 100)", n); }
+        { // bar-locked in Logic sync, and every cycle jump starts the pass count again
+          SeqSettings x = d; x.followHost = true; x.play = false; x.direction = 2; x.pendRepeat = true; x.loopLen = 5;
+          auto mk = [&](StepSequencer& q) { fill(q, {60, 62, 64, 65, 67, 69, 71}); q.setCondition(0, 2, 3); q.setCondition(2, 1, 4); q.setCondition(4, 3, 3); };
+          StepSequencer a, b; mk(a); mk(b);
+          const auto full = run(a, x, bpm, sr, 512, 16 * 24000, true, 0.0), late = run(b, x, bpm, sr, 700, 12 * 24000, true, 4.0);
+          std::vector<Ev> ref; for (auto& y : full) if (y.pos >= 96000) ref.push_back({y.pos - 96000, y.on, y.note, y.vel});
+          CHECK(!ref.empty() && sameNear(ref, late), "conditions depend only on the host position");
+          const long long cyc = 192000; StepSequencer c; mk(c);
+          const auto e = run(c, x, bpm, sr, 512, 2 * cyc, true, 0.0, {{cyc, 0.0}});
+          std::vector<Ev> p1, p2; for (auto& y : e) (y.pos < cyc ? p1 : p2).push_back({y.pos < cyc ? y.pos : y.pos - cyc, y.on, y.note, y.vel});
+          CHECK(!p1.empty() && sameNear(p1, p2), "a Logic cycle jump restarts the pass count: every cycle plays the same (%zu vs %zu events)", p1.size(), p2.size()); }
+    }
+
+    printf("T27 everything at once: notes always alternate on/off (no stuck notes), the event buffer is never full\n");
+    {
+        std::mt19937 rng(12345);
+        auto rnd = [&](int lo, int hi) { return lo + (int) (rng() % (unsigned) (hi - lo + 1)); };
+        int worstEvents = 0; long long totalOns = 0; bool allOk = true;
+        for (int trial = 0; trial < 60; ++trial)
+        {
+            StepSequencer q; const int len = rnd(1, 12);
+            for (int i = 0; i < len; ++i)
+            {
+                if (rnd(0, 5) == 0) q.addRest(); else q.recordNote(rnd(30, 100), rnd(20, 120));
+                if (rnd(0, 1)) q.setRatchet(i, rnd(1, 8));
+                if (rnd(0, 2) == 0) q.setStepGate(i, rnd(0, 100));
+                if (rnd(0, 2) == 0) q.toggleAccent(i);
+                if (rnd(0, 2) == 0) q.setOctChance(i, rnd(0, 100));
+                if (rnd(0, 2) == 0) q.setCondition(i, rnd(1, 8), rnd(1, 8));
+                if (rnd(0, 2) == 0) q.setProb(i, rnd(0, 100));
+            }
+            SeqSettings x; x.play = true; x.division = rnd(0, 7); x.gate = 0.05f + (float) rnd(0, 95) / 100.f; x.loopLen = rnd(0, 6); x.direction = rnd(0, 3);
+            x.pendRepeat = rnd(0, 1); x.prob = (float) rnd(50, 100) / 100.f; x.seed = rnd(0, 3); x.swing = 50.f + (float) rnd(0, 25);
+            x.accent = (float) rnd(0, 100) / 100.f; x.octMode = rnd(0, 5); x.scale = rnd(-1, 27); x.root = rnd(0, 11); x.transpose = rnd(-12, 12);
+            const double tempo = rnd(0, 1) ? 300.0 : 90.0; const int bs = rnd(0, 1) ? 8192 : rnd(64, 1500);
+            // run, then stop the transport: everything must be released
+            std::vector<SeqEvent> all; static SeqEvent buf[2048]; SeqHostInfo h; h.hostPlaying = true; h.havePpq = true; h.bpm = tempo;
+            for (long long t = 0; t < 96000; t += bs)
+            {
+                const int n = (int) std::min<long long>(bs, 96000 - t);
+                const int c = q.process(sr, n, h, x, buf, 2048); worstEvents = std::max(worstEvents, c); if (c >= 2048) allOk = false;
+                for (int i = 0; i < c; ++i) all.push_back(buf[i]);
+            }
+            SeqSettings stop = x; stop.play = false; const int c = q.process(sr, 512, h, stop, buf, 2048);
+            for (int i = 0; i < c; ++i) all.push_back(buf[i]);
+            bool sounding = false; int soundingNote = -1; int lastOffset = -1;
+            for (auto& ev : all)
+            {
+                if (ev.on) { if (sounding) allOk = false; sounding = true; soundingNote = ev.note; ++totalOns; allOk = allOk && ev.vel >= 1 && ev.vel <= 127 && ev.note >= 0 && ev.note <= 127; }
+                else { if (!sounding || ev.note != soundingNote) allOk = false; sounding = false; }
+            }
+            (void) lastOffset;
+            if (sounding) allOk = false;
+            if (!allOk) { printf("  (trial %d failed: division %d bs %d tempo %.0f)\n", trial, x.division, bs, tempo); break; }
+        }
+        { // the worst case a host could send: very fast tempo, huge block, smallest step, 8 repeats. The plugin keeps room for 2048 events per block.
+          StepSequencer q; fill(q, {60, 62, 64}); for (int i = 0; i < 3; ++i) q.setRatchet(i, 8);
+          SeqSettings x; x.play = true; x.division = 7; x.gate = 0.5f;
+          static SeqEvent buf[2048]; SeqHostInfo h; h.hostPlaying = true; h.havePpq = true; h.bpm = 990.0;
+          int worst = 0; bool ok = true;
+          for (int blk = 0; blk < 12; ++blk) { const int c = q.process(sr, 8192, h, x, buf, 2048); worst = std::max(worst, c); ok = ok && c < 2048; for (int i = 0; i + 1 < c; ++i) ok = ok && buf[i].on != buf[i + 1].on; }
+          printf("  (worst case: %d events in one block)\n", worst);
+          CHECK(ok && worst > 64, "990 bpm, 1/32T, 8 repeats, 8192-sample blocks: at most %d events per block, far above the old 64-event buffer, still below 2048", worst); }
+        CHECK(allOk, "60 random patterns / settings: on and off strictly alternate with matching notes, nothing left sounding, buffer never full");
+        printf("  (%lld note-ons in total, at most %d events in one block)\n", totalOns, worstEvents);
     }
 
     printf(failures ? "FAIL (%d)\n" : "PASS\n", failures);

@@ -1,5 +1,5 @@
-// Renders the plugin editor offscreen and writes a PNG:  ./editor_snapshot out.png [width] [prob]
-// (a third argument "prob" shows the grid in its PROB lane)
+// Renders the plugin editor offscreen and writes a PNG:  ./editor_snapshot out.png [width] [lane]
+// (the third argument picks the grid lane: pitch (default), prob, ratch, gate, accent, oct, cond)
 #include "PluginEditor.h"
 #include <cstdlib>
 #include <string>
@@ -16,17 +16,24 @@ int main(int argc, char** argv)
     proc.sequencer().addRest(); for (int n : {65, 62, 59, 55, 57, 60, 64}) proc.sequencer().recordNote(n, 90);
     for (int i = 0; i < 12; ++i) proc.sequencer().setProb(i, i % 4 == 0 ? 100 : 100 - i * 7); // a few non-default step probabilities
     set("seq_dir", 2.0f / 3.0f); set("seq_prob", 0.8f); set("seq_loop", 10.0f / 32.0f); set("seq_seed", 0.0f);
+    // v0.6: a few non-default per-step values and settings so every lane has something to show
+    for (int i : {0, 4, 8, 12}) proc.sequencer().setRatchet(i, i == 0 ? 3 : (i == 4 ? 2 : (i == 8 ? 4 : 8)));
+    proc.sequencer().setStepGate(2, 80); proc.sequencer().setStepGate(6, 25); proc.sequencer().setStepGate(9, 100);
+    for (int i : {1, 3, 6, 10}) proc.sequencer().toggleAccent(i);
+    proc.sequencer().setOctChance(5, 40); proc.sequencer().setOctChance(7, 100); proc.sequencer().setOctChance(11, 15);
+    proc.sequencer().setCondition(3, 1, 3); proc.sequencer().setCondition(7, 2, 4); proc.sequencer().setCondition(9, 3, 8);
+    set("seq_swing", 0.667f); set("seq_accent", 0.5f); set("seq_octmode", 2.0f / 5.0f);
     set("seq_scale", 6.0f / 28.0f); set("seq_root", 9.0f / 11.0f); set("seq_xpose", 1.0f); // Aeolian (Natural Minor), root A, MIDI XPOSE on
     proc.setSeqTranspose(2);
     proc.apvts.getParameter("seq_play")->setValueNotifyingHost(1.f);
     { juce::AudioBuffer<float> b(2, 512); juce::MidiBuffer m; proc.processBlock(b, m); proc.processBlock(b, m); }
     std::unique_ptr<juce::AudioProcessorEditor> ed(proc.createEditor());
     const int w = argc > 2 ? std::atoi(argv[2]) : 840;
-    ed->setSize(w, int(w * 726.0 / 840.0));
-    if (argc > 3 && std::string(argv[3]) == "prob")
+    ed->setSize(w, int(w * 762.0 / 840.0));
+    if (argc > 3)
         for (auto* c : ed->getChildren())
             if (auto* b = dynamic_cast<juce::TextButton*>(c))
-                if (b->getButtonText() == "PROB") b->setToggleState(true, juce::sendNotificationSync);
+                if (b->getRadioGroupId() == 1001 && b->getButtonText().equalsIgnoreCase(argv[3])) b->setToggleState(true, juce::sendNotificationSync);
     auto img = ed->createComponentSnapshot(ed->getLocalBounds(), true, 1.0f);
     juce::File f(argc > 1 ? argv[1] : "editor.png");
     f.deleteFile();

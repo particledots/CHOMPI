@@ -111,7 +111,9 @@ void StepGrid::refresh()
     seq_.snapshot(fresh, len, playing);
     bool changed = (len != len_) || (playing != playing_);
     for (int i = 0; i < StepSequencer::kMaxSteps && !changed; ++i)
-        changed = fresh[i].note != steps_[i].note || fresh[i].rest != steps_[i].rest || fresh[i].prob != steps_[i].prob;
+        changed = fresh[i].note != steps_[i].note || fresh[i].rest != steps_[i].rest || fresh[i].prob != steps_[i].prob
+                  || fresh[i].ratchet != steps_[i].ratchet || fresh[i].gate != steps_[i].gate || fresh[i].accent != steps_[i].accent
+                  || fresh[i].octChance != steps_[i].octChance || fresh[i].condA != steps_[i].condA || fresh[i].condB != steps_[i].condB;
     if (!changed) return;
     for (int i = 0; i < StepSequencer::kMaxSteps; ++i) steps_[i] = fresh[i];
     len_ = len; playing_ = playing;
@@ -132,9 +134,49 @@ int StepGrid::cellAt(juce::Point<int> p) const
     return row * 16 + col;
 }
 
+int StepGrid::effectiveGate(const SeqStep& st) const
+{
+    return st.gate > 0 ? (int) st.gate : juce::jlimit(5, 100, juce::roundToInt(globalGate_ * 100.0f));
+}
+
+int StepGrid::laneValue(const SeqStep& st) const
+{
+    switch (lane_)
+    {
+        case Lane::Pitch:   return st.note;
+        case Lane::Prob:    return st.prob;
+        case Lane::Ratchet: return st.ratchet;
+        case Lane::Gate:    return effectiveGate(st);
+        case Lane::Oct:     return st.octChance;
+        case Lane::Cond:    return StepSequencer::conditionToIndex(st.condA, st.condB);
+        case Lane::Accent:  return st.accent ? 1 : 0;
+    }
+    return 0;
+}
+
+void StepGrid::setLaneValue(int i, int v)
+{
+    switch (lane_)
+    {
+        case Lane::Prob:    seq_.setProb(i, juce::jlimit(0, 100, v)); break;
+        case Lane::Ratchet: seq_.setRatchet(i, juce::jlimit(1, StepSequencer::kMaxRatchet, v)); break;
+        case Lane::Gate:    seq_.setStepGate(i, juce::jlimit(5, 100, v)); break;
+        case Lane::Oct:     seq_.setOctChance(i, juce::jlimit(0, 100, v)); break;
+        case Lane::Cond:
+        {
+            int a = 1, b = 1;
+            StepSequencer::conditionFromIndex(juce::jlimit(0, StepSequencer::kNumConditions - 1, v), a, b);
+            seq_.setCondition(i, a, b);
+            break;
+        }
+        case Lane::Pitch: case Lane::Accent: break;
+    }
+}
+
 void StepGrid::paint(juce::Graphics& g)
 {
     const float scale = getWidth() / 700.0f;
+    const bool barLane = lane_ != Lane::Pitch;
     for (int i = 0; i < StepSequencer::kMaxSteps; ++i)
     {
         const auto r = cellBounds(i);
@@ -147,30 +189,42 @@ void StepGrid::paint(juce::Graphics& g)
         }
         else
         {
-            const bool rest = steps_[i].rest;
-            const bool probLane = lane_ == Lane::Prob;
-            // in the PITCH lane the playing step is filled solid; in the PROB lane the fill is the probability bar
-            const bool solid = isPlaying && !probLane;
+            const SeqStep& st = steps_[i];
+            const bool rest = st.rest;
+
+            // what this lane shows for the step: a bar (fill 0..1), a text, and whether the value is a non-default one
+            float fill = 0.0f; bool bright = true, dimBar = false;
+            juce::String text;
+            switch (lane_)
+            {
+                case Lane::Pitch:   text = noteName(st.note); break;
+                case Lane::Prob:    fill = st.prob / 100.0f; text = juce::String(st.prob) + "%"; break;
+                case Lane::Ratchet: fill = (st.ratchet - 1) / 7.0f; bright = st.ratchet > 1; text = "x" + juce::String(st.ratchet); break;
+                case Lane::Gate:    fill = effectiveGate(st) / 100.0f; bright = st.gate > 0; dimBar = st.gate == 0; text = juce::String(effectiveGate(st)) + "%"; break;
+                case Lane::Accent:  fill = st.accent ? 1.0f : 0.0f; bright = st.accent; text = st.accent ? "ACC" : "-"; break;
+                case Lane::Oct:     fill = st.octChance / 100.0f; bright = st.octChance > 0; text = juce::String(st.octChance) + "%"; break;
+                case Lane::Cond:    bright = st.condB > 1; text = st.condB > 1 ? juce::String(st.condA) + ":" + juce::String(st.condB) : juce::String("ALL"); break;
+            }
+
+            // in the PITCH lane the playing step is filled solid; in the other lanes the fill is the value bar
+            const bool solid = isPlaying && !barLane;
             g.setColour(solid ? kAccent : (rest ? juce::Colour(0xff1b1c20) : juce::Colour(0xff2d2f35)));
             g.fillRoundedRectangle(r, 5.0f);
-            if (probLane && !rest)
+            if (barLane && !rest && fill > 0.0f)
             {
                 juce::Path clip; clip.addRoundedRectangle(r, 5.0f);
                 g.saveState();
                 g.reduceClipRegion(clip);
-                const float h = r.getHeight() * steps_[i].prob / 100.0f;
-                g.setColour(kAccent.withAlpha(isPlaying ? 0.85f : 0.42f));
+                const float h = r.getHeight() * fill;
+                g.setColour(kAccent.withAlpha(isPlaying ? 0.85f : (dimBar ? 0.22f : 0.42f)));
                 g.fillRect(r.getX(), r.getBottom() - h, r.getWidth(), h);
                 g.restoreState();
             }
             g.setColour(isPlaying ? kAccent : kEdge);
-            g.drawRoundedRectangle(r.reduced(0.5f), 5.0f, isPlaying && probLane ? 2.0f : 1.0f);
-            g.setColour(solid ? kBg : (rest ? kDim : kText));
+            g.drawRoundedRectangle(r.reduced(0.5f), 5.0f, isPlaying && barLane ? 2.0f : 1.0f);
+            g.setColour(solid ? kBg : (rest ? kDim : (bright ? kText : kDim)));
             g.setFont(makeFont(juce::jmax(9.0f, 12.5f * scale), true));
-            if (probLane)
-                g.drawText(rest ? juce::String("-") : juce::String(steps_[i].prob) + "%", r, juce::Justification::centred);
-            else
-                g.drawText(rest ? juce::String("-") : noteName(steps_[i].note), r, juce::Justification::centred);
+            g.drawText(rest && barLane ? juce::String("-") : (rest ? juce::String("-") : text), r, juce::Justification::centred);
         }
         g.setColour(isPlaying && lane_ == Lane::Pitch ? kBg : kDim.withAlpha(0.8f));
         g.setFont(makeFont(juce::jmax(7.0f, 8.5f * scale)));
@@ -183,38 +237,51 @@ void StepGrid::mouseDown(const juce::MouseEvent& e)
     dragIdx_ = cellAt(e.getPosition());
     dragged_ = false;
     dragStartY_ = e.y;
-    dragStartNote_ = (dragIdx_ >= 0 && dragIdx_ < len_) ? steps_[dragIdx_].note : 60;
-    dragStartProb_ = (dragIdx_ >= 0 && dragIdx_ < len_) ? steps_[dragIdx_].prob : 100;
+    dragStartValue_ = (dragIdx_ >= 0 && dragIdx_ < len_) ? laneValue(steps_[dragIdx_]) : (lane_ == Lane::Pitch ? 60 : 0);
 }
 
 void StepGrid::mouseDrag(const juce::MouseEvent& e)
 {
-    if (dragIdx_ < 0 || dragIdx_ >= len_ || steps_[dragIdx_].rest) return;
+    if (dragIdx_ < 0 || dragIdx_ >= len_ || steps_[dragIdx_].rest || lane_ == Lane::Accent) return;
     const int dy = dragStartY_ - e.y;
     if (std::abs(dy) > 4) dragged_ = true;
     if (!dragged_) return;
-    if (lane_ == Lane::Prob) seq_.setProb(dragIdx_, juce::jlimit(0, 100, dragStartProb_ + dy)); // 1 pixel = 1 %
-    else // with a scale set the stored note snaps to a scale tone while dragging
-        seq_.setNote(dragIdx_, StepSequencer::quantizeNote(juce::jlimit(0, 127, dragStartNote_ + dy / 6), root_, scale_));
+    switch (lane_)
+    {
+        case Lane::Pitch: // with a scale set the stored note snaps to a scale tone while dragging
+            seq_.setNote(dragIdx_, StepSequencer::quantizeNote(juce::jlimit(0, 127, dragStartValue_ + dy / 6), root_, scale_));
+            break;
+        case Lane::Prob: case Lane::Gate: case Lane::Oct: setLaneValue(dragIdx_, dragStartValue_ + dy); break; // 1 pixel = 1 %
+        case Lane::Ratchet: setLaneValue(dragIdx_, dragStartValue_ + dy / 12); break;                          // 12 pixels per repeat
+        case Lane::Cond:    setLaneValue(dragIdx_, dragStartValue_ + dy / 6); break;                           // 6 pixels per condition
+        case Lane::Accent:  break;
+    }
     refresh();
 }
 
 void StepGrid::mouseUp(const juce::MouseEvent&)
 {
-    if (!dragged_ && dragIdx_ >= 0 && lane_ == Lane::Pitch) // in the PROB lane a plain click does nothing
+    if (!dragged_ && dragIdx_ >= 0)
     {
-        seq_.toggleRest(dragIdx_);
-        refresh();
+        if (lane_ == Lane::Pitch) { seq_.toggleRest(dragIdx_); refresh(); }
+        else if (lane_ == Lane::Accent) { seq_.toggleAccent(dragIdx_); refresh(); } // in the other lanes a plain click does nothing
     }
     dragIdx_ = -1;
 }
 
 void StepGrid::mouseDoubleClick(const juce::MouseEvent& e)
 {
-    if (lane_ != Lane::Prob) return;
     const int i = cellAt(e.getPosition());
     if (i < 0 || i >= len_) return;
-    seq_.setProb(i, 100);
+    switch (lane_)
+    {
+        case Lane::Prob:    seq_.setProb(i, 100); break;
+        case Lane::Ratchet: seq_.setRatchet(i, 1); break;
+        case Lane::Gate:    seq_.setStepGate(i, 0); break;      // back to following the GATE knob
+        case Lane::Oct:     seq_.setOctChance(i, 0); break;
+        case Lane::Cond:    seq_.setCondition(i, 1, 1); break;  // ALL
+        case Lane::Pitch: case Lane::Accent: return;
+    }
     refresh();
 }
 
@@ -222,8 +289,17 @@ void StepGrid::mouseWheelMove(const juce::MouseEvent& e, const juce::MouseWheelD
 {
     const int i = cellAt(e.getPosition());
     if (i < 0 || i >= len_ || steps_[i].rest || w.deltaY == 0.0f) return;
-    if (lane_ == Lane::Prob) seq_.setProb(i, juce::jlimit(0, 100, (int) steps_[i].prob + (w.deltaY > 0 ? 5 : -5)));
-    else                     seq_.setNote(i, StepSequencer::scaleStep(steps_[i].note, w.deltaY > 0 ? 1 : -1, root_, scale_)); // one scale step per notch
+    const int up = w.deltaY > 0 ? 1 : -1;
+    switch (lane_)
+    {
+        case Lane::Pitch:   seq_.setNote(i, StepSequencer::scaleStep(steps_[i].note, up, root_, scale_)); break; // one scale step per notch
+        case Lane::Prob:    setLaneValue(i, laneValue(steps_[i]) + 5 * up); break;
+        case Lane::Gate:    setLaneValue(i, laneValue(steps_[i]) + 5 * up); break;
+        case Lane::Oct:     setLaneValue(i, laneValue(steps_[i]) + 5 * up); break;
+        case Lane::Ratchet: setLaneValue(i, laneValue(steps_[i]) + up); break;
+        case Lane::Cond:    setLaneValue(i, laneValue(steps_[i]) + up); break;
+        case Lane::Accent:  return;
+    }
     refresh();
 }
 
@@ -290,6 +366,10 @@ WT8Editor::Knob& WT8Editor::addKnob(const juce::String& id, const juce::String& 
             s.textFromValueFunction = [](double v) { const int n = juce::roundToInt(v); return n == 0 ? juce::String("ALL") : juce::String(n); };
             s.valueFromTextFunction = [](const juce::String& t) { return t.trim().equalsIgnoreCase("all") ? 0.0 : (double) t.getIntValue(); };
             break;
+        case Kind::Swing: // 50..75 %, shown without a trailing ".0"
+            s.textFromValueFunction = [](double v) { return juce::String(v, 1).trimCharactersAtEnd("0").trimCharactersAtEnd(".") + "%"; };
+            s.valueFromTextFunction = [](const juce::String& t) { return (double) t.retainCharacters("0123456789.").getFloatValue(); };
+            break;
         case Kind::Seed: // 0 = different every time
             s.textFromValueFunction = [](double v) { const int n = juce::roundToInt(v); return n == 0 ? juce::String("RANDOM") : juce::String(n); };
             s.valueFromTextFunction = [](const juce::String& t) { return t.trim().startsWithIgnoreCase("r") ? 0.0 : (double) t.getIntValue(); };
@@ -353,8 +433,9 @@ WT8Editor::WT8Editor(WT8AudioProcessor& p) : juce::AudioProcessorEditor(&p), pro
     row2_.push_back({"OUTPUT",     {&gain, &pan, &boost}, {}});
 
     // ---- sequencer strip ----
-    seqKnobs_ = {&addKnob("seq_gate", "GATE",  Kind::Percent),    &addKnob("seq_prob", "PROB", Kind::Percent),
-                 &addKnob("seq_loop", "LOOP",  Kind::LoopLength), &addKnob("seq_seed", "SEED", Kind::Seed)};
+    seqKnobs_ = {&addKnob("seq_gate",  "GATE",   Kind::Percent),    &addKnob("seq_prob",   "PROB",   Kind::Percent),
+                 &addKnob("seq_loop",  "LOOP",   Kind::LoopLength), &addKnob("seq_seed",   "SEED",   Kind::Seed),
+                 &addKnob("seq_swing", "SWING",  Kind::Swing),      &addKnob("seq_accent", "ACCENT", Kind::Percent)};
 
     for (auto* b : {&recBtn_, &restBtn_, &delBtn_, &clearBtn_, &playBtn_, &muteBtn_}) addAndMakeVisible(*b);
     recBtn_.setClickingTogglesState(true);
@@ -378,6 +459,8 @@ WT8Editor::WT8Editor(WT8AudioProcessor& p) : juce::AudioProcessorEditor(&p), pro
     fillCombo(dirBox_, "seq_dir");
     fillCombo(scaleBox_, "seq_scale");
     fillCombo(rootBox_, "seq_root");
+    fillCombo(octBox_, "seq_octmode");
+    octAtt_ = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(proc_.apvts, "seq_octmode", octBox_);
     scaleAtt_ = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(proc_.apvts, "seq_scale", scaleBox_);
     rootAtt_ = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(proc_.apvts, "seq_root", rootBox_);
     syncAtt_ = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(proc_.apvts, "seq_sync", syncBox_);
@@ -385,15 +468,17 @@ WT8Editor::WT8Editor(WT8AudioProcessor& p) : juce::AudioProcessorEditor(&p), pro
     dirAtt_ = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(proc_.apvts, "seq_dir", dirBox_);
 
     // lane switch (which per-step value the grid shows and edits) - editor state only, not saved
-    for (auto* b : {&pitchLaneBtn_, &probLaneBtn_})
-    {
-        b->setClickingTogglesState(true);
-        b->setRadioGroupId(1001);
-        addAndMakeVisible(*b);
-    }
+    auto addLane = [this](juce::TextButton& btn, StepGrid::Lane lane) {
+        btn.setClickingTogglesState(true);
+        btn.setRadioGroupId(1001);
+        addAndMakeVisible(btn);
+        btn.onClick = [this, &btn, lane] { if (btn.getToggleState()) grid_.setLane(lane); };
+    };
+    addLane(pitchLaneBtn_, StepGrid::Lane::Pitch);   addLane(probLaneBtn_, StepGrid::Lane::Prob);
+    addLane(ratchLaneBtn_, StepGrid::Lane::Ratchet); addLane(gateLaneBtn_, StepGrid::Lane::Gate);
+    addLane(accentLaneBtn_, StepGrid::Lane::Accent); addLane(octLaneBtn_, StepGrid::Lane::Oct);
+    addLane(condLaneBtn_, StepGrid::Lane::Cond);
     pitchLaneBtn_.setToggleState(true, juce::dontSendNotification);
-    pitchLaneBtn_.onClick = [this] { if (pitchLaneBtn_.getToggleState()) grid_.setLane(StepGrid::Lane::Pitch); };
-    probLaneBtn_.onClick = [this] { if (probLaneBtn_.getToggleState()) grid_.setLane(StepGrid::Lane::Prob); };
 
     pendBtn_.setClickingTogglesState(true);
     addAndMakeVisible(pendBtn_);
@@ -410,7 +495,7 @@ WT8Editor::WT8Editor(WT8AudioProcessor& p) : juce::AudioProcessorEditor(&p), pro
     xposeReadout_.getProperties().set("fontHeight", 13.0f);
     xposeReadout_.setInterceptsMouseClicks(false, false);
 
-    for (auto* l : {&syncLabel_, &divLabel_, &laneLabel_, &dirLabel_, &scaleLabel_, &rootLabel_})
+    for (auto* l : {&syncLabel_, &divLabel_, &laneLabel_, &dirLabel_, &scaleLabel_, &rootLabel_, &octLabel_})
     {
         l->setJustificationType(juce::Justification::centredRight);
         l->setColour(juce::Label::textColourId, kDim);
@@ -424,12 +509,13 @@ WT8Editor::WT8Editor(WT8AudioProcessor& p) : juce::AudioProcessorEditor(&p), pro
     dirLabel_.setText("DIRECTION", juce::dontSendNotification);
     scaleLabel_.setText("SCALE", juce::dontSendNotification);
     rootLabel_.setText("ROOT", juce::dontSendNotification);
+    octLabel_.setText("OCT JUMP", juce::dontSendNotification);
     addAndMakeVisible(grid_);
 
     setResizable(true, true);
-    setResizeLimits(630, 545, 1260, 1089);
-    getConstrainer()->setFixedAspectRatio(840.0 / 726.0);
-    setSize(840, 726);
+    setResizeLimits(630, 572, 1260, 1143);
+    getConstrainer()->setFixedAspectRatio(840.0 / 762.0);
+    setSize(840, 762);
     grid_.refresh();
     timerCallback(); // fill in the transpose readout and scale state straight away
     startTimerHz(15);
@@ -441,6 +527,8 @@ void WT8Editor::timerCallback()
     recBtn_.setToggleState(proc_.isSeqRecording(), juce::dontSendNotification);
     playBtn_.setEnabled(syncBox_.getSelectedItemIndex() == 0); // in "Logic" sync, Logic's transport is the play button
     pendBtn_.setEnabled(dirBox_.getSelectedItemIndex() == 2);  // end-repeat only applies to the pendulum
+
+    grid_.setGlobalGate(*proc_.apvts.getRawParameterValue("seq_gate")); // the GATE lane shows this for steps without their own gate
 
     // scale (item 0 of the box = Off) for the grid's pitch editing
     grid_.setScale(scaleBox_.getSelectedItemIndex() - 1, rootBox_.getSelectedItemIndex());
@@ -546,11 +634,11 @@ void WT8Editor::resized()
     seqBounds_ = full.withTrimmedBottom(margin);
     auto inner = seqBounds_.withTrimmedTop(int(24 * scale)).reduced(int(8 * scale), int(4 * scale));
 
-    // right: 2 x 2 block of knobs (GATE PROB / LOOP SEED)
+    // right: 2 columns x 3 rows of knobs (GATE PROB / LOOP SEED / SWING ACCENT)
     {
         auto block = inner.removeFromRight(int(176 * scale));
         inner.removeFromRight(int(8 * scale));
-        const int cw = block.getWidth() / 2, ch = block.getHeight() / 2;
+        const int cw = block.getWidth() / 2, ch = block.getHeight() / 3;
         for (size_t n = 0; n < seqKnobs_.size(); ++n)
         {
             auto cell = juce::Rectangle<int>(block.getX() + (int) (n % 2) * cw, block.getY() + (int) (n / 2) * ch, cw, ch);
@@ -562,7 +650,7 @@ void WT8Editor::resized()
         }
     }
 
-    for (auto* l : {&syncLabel_, &divLabel_, &laneLabel_, &dirLabel_, &scaleLabel_, &rootLabel_})
+    for (auto* l : {&syncLabel_, &divLabel_, &laneLabel_, &dirLabel_, &scaleLabel_, &rootLabel_, &octLabel_})
         l->getProperties().set("fontHeight", 11.0f * scale);
     xposeReadout_.getProperties().set("fontHeight", 13.0f * scale);
 
@@ -575,19 +663,25 @@ void WT8Editor::resized()
     controls.removeFromLeft(int(10 * scale));
     put(syncLabel_, 34); put(syncBox_, 66); put(divLabel_, 34); put(divBox_, 62);
 
-    // row B: which lane the grid edits, and how the pattern is played back
+    // row B: how the pattern is played back (direction) and which scale its notes are snapped to
     inner.removeFromTop(int(6 * scale));
     controls = inner.removeFromTop(int(30 * scale));
-    put(laneLabel_, 34); put(pitchLaneBtn_, 54); put(probLaneBtn_, 54);
-    controls.removeFromLeft(int(14 * scale));
     put(dirLabel_, 66); put(dirBox_, 92); put(pendBtn_, 62);
+    controls.removeFromLeft(int(14 * scale));
+    put(scaleLabel_, 40); put(scaleBox_, 170); put(rootLabel_, 34); put(rootBox_, 52);
 
-    // row C (v0.5): scale quantizing and transpose from MIDI in
+    // row C: transpose from MIDI in (v0.5), octave-jump size (v0.6)
     inner.removeFromTop(int(6 * scale));
     controls = inner.removeFromTop(int(30 * scale));
-    put(scaleLabel_, 40); put(scaleBox_, 170); put(rootLabel_, 34); put(rootBox_, 52);
-    controls.removeFromLeft(int(14 * scale));
     put(xposeBtn_, 82); put(xposeReadout_, 52); put(xposeResetBtn_, 52);
+    controls.removeFromLeft(int(14 * scale));
+    put(octLabel_, 62); put(octBox_, 140);
+
+    // row D: which per-step value the grid shows and edits
+    inner.removeFromTop(int(6 * scale));
+    controls = inner.removeFromTop(int(30 * scale));
+    put(laneLabel_, 34); put(pitchLaneBtn_, 54); put(probLaneBtn_, 50); put(ratchLaneBtn_, 58); put(gateLaneBtn_, 50);
+    put(accentLaneBtn_, 62); put(octLaneBtn_, 46); put(condLaneBtn_, 52);
 
     inner.removeFromTop(int(6 * scale));
     grid_.setBounds(inner);

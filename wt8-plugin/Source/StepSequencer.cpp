@@ -3,9 +3,11 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cctype>
 #include <cstdlib>
 #include <initializer_list>
 #include <random>
+#include <vector>
 
 struct StepSequencer::Lock
 {
@@ -118,6 +120,58 @@ int StepSequencer::playedNote(int note, int transpose, int root, int scale)
     return quantizeNote(std::max(0, std::min(127, note + transpose)), root, scale);
 }
 
+const char* StepSequencer::octModeName(int mode)
+{
+    static const char* n[kNumOctModes] = {"Up 1 octave", "Down 1 octave", "Up or down 1 octave",
+                                          "Up 2 octaves", "Down 2 octaves", "Up or down 2 octaves"};
+    return n[std::max(0, std::min(kNumOctModes - 1, mode))];
+}
+
+int StepSequencer::octaveShift(int mode, double r)
+{
+    switch (std::max(0, std::min(kNumOctModes - 1, mode)))
+    {
+        case 0: return 12;
+        case 1: return -12;
+        case 2: return r < 0.5 ? 12 : -12;
+        case 3: return 24;
+        case 4: return -24;
+        default: return r < 0.5 ? 24 : -24;
+    }
+}
+
+// Condition list: index 0 = 1 of 1 (always); then for b = 2..8 the b entries "1 of b" .. "b of b". Entries of b start at b(b-1)/2.
+void StepSequencer::conditionFromIndex(int index, int& a, int& b)
+{
+    index = std::max(0, std::min(kNumConditions - 1, index));
+    if (index == 0) { a = 1; b = 1; return; }
+    b = 2;
+    while (b < 8 && index >= (b + 1) * b / 2) ++b;
+    a = index - b * (b - 1) / 2 + 1;
+}
+
+int StepSequencer::conditionToIndex(int a, int b)
+{
+    b = std::max(1, std::min(8, b));
+    a = std::max(1, std::min(b, a));
+    return b == 1 ? 0 : b * (b - 1) / 2 + a - 1;
+}
+
+long long StepSequencer::passIndex(long long k, int L, int direction, bool pendRepeat)
+{
+    long long period = std::max(1, L);
+    if (direction == 2 && L > 1) period = pendRepeat ? 2LL * L : 2LL * L - 2;
+    return (k - posMod(k, period)) / period; // floor division, so counters before the start of the song stay consistent
+}
+
+bool StepSequencer::conditionPasses(int a, int b, long long pass)
+{
+    if (b <= 1) return true;
+    b = std::min(8, b);
+    a = std::max(1, std::min(b, a));
+    return posMod(pass, b) == a - 1;
+}
+
 StepSequencer::StepSequencer()
 {
     uint64_t seed = (uint64_t) std::chrono::steady_clock::now().time_since_epoch().count() ^ (uint64_t) (uintptr_t) this;
@@ -223,6 +277,43 @@ void StepSequencer::setProb(int index, int percent)
     steps_[index].prob = (uint8_t) std::max(0, std::min(100, percent));
 }
 
+void StepSequencer::setRatchet(int index, int repeats)
+{
+    Lock l(lock_);
+    if (index < 0 || index >= len_ || steps_[index].rest) return;
+    steps_[index].ratchet = (uint8_t) std::max(1, std::min(kMaxRatchet, repeats));
+}
+
+void StepSequencer::setStepGate(int index, int percent)
+{
+    Lock l(lock_);
+    if (index < 0 || index >= len_ || steps_[index].rest) return;
+    steps_[index].gate = percent <= 0 ? (uint8_t) 0 : (uint8_t) std::max(5, std::min(100, percent));
+}
+
+void StepSequencer::toggleAccent(int index)
+{
+    Lock l(lock_);
+    if (index < 0 || index >= len_ || steps_[index].rest) return;
+    steps_[index].accent = !steps_[index].accent;
+}
+
+void StepSequencer::setOctChance(int index, int percent)
+{
+    Lock l(lock_);
+    if (index < 0 || index >= len_ || steps_[index].rest) return;
+    steps_[index].octChance = (uint8_t) std::max(0, std::min(100, percent));
+}
+
+void StepSequencer::setCondition(int index, int a, int b)
+{
+    Lock l(lock_);
+    if (index < 0 || index >= len_ || steps_[index].rest) return;
+    b = std::max(1, std::min(8, b));
+    steps_[index].condB = (uint8_t) b;
+    steps_[index].condA = (uint8_t) std::max(1, std::min(b, a));
+}
+
 void StepSequencer::toggleRest(int index)
 {
     Lock l(lock_);
@@ -241,6 +332,48 @@ void StepSequencer::toggleRest(int index)
     }
 }
 
+namespace
+{
+// v0.6 appends tagged fields after the numbers, only for values that are not the default, so a pattern that does not use
+// them is saved exactly as in v0.5:  x<ratchet> g<gate %> a (accent) o<octave chance %> c<a>/<b>  e.g. "60:100:75:x3:g50:a:c2/3".
+std::string stepTags(const SeqStep& s)
+{
+    std::string t;
+    if (s.ratchet > 1) t += ":x" + std::to_string((int) s.ratchet);
+    if (s.gate > 0) t += ":g" + std::to_string((int) s.gate);
+    if (s.accent) t += ":a";
+    if (s.octChance > 0) t += ":o" + std::to_string((int) s.octChance);
+    if (s.condB > 1) t += ":c" + std::to_string((int) s.condA) + "/" + std::to_string((int) s.condB);
+    return t;
+}
+
+void applyTag(SeqStep& s, const std::string& f)
+{
+    if (f.empty()) return;
+    const char* v = f.c_str() + 1;
+    int n = 0;
+    switch (f[0])
+    {
+        case 'x': if (std::sscanf(v, "%d", &n) == 1) s.ratchet = (uint8_t) std::max(1, std::min(StepSequencer::kMaxRatchet, n)); break;
+        case 'g': if (std::sscanf(v, "%d", &n) == 1) s.gate = n <= 0 ? (uint8_t) 0 : (uint8_t) std::max(5, std::min(100, n)); break;
+        case 'a': s.accent = true; break;
+        case 'o': if (std::sscanf(v, "%d", &n) == 1) s.octChance = (uint8_t) std::max(0, std::min(100, n)); break;
+        case 'c':
+        {
+            int a = 1, b = 1;
+            if (std::sscanf(v, "%d/%d", &a, &b) == 2)
+            {
+                b = std::max(1, std::min(8, b));
+                s.condB = (uint8_t) b;
+                s.condA = (uint8_t) std::max(1, std::min(b, a));
+            }
+            break;
+        }
+        default: break; // a tag from a later version: ignored
+    }
+}
+} // namespace
+
 std::string StepSequencer::serialize() const
 {
     Lock l(lock_);
@@ -248,7 +381,8 @@ std::string StepSequencer::serialize() const
     for (int i = 0; i < len_; ++i)
     {
         // v0.3 format is "note:vel" or "r". v0.4 appends ":prob" (or "r:prob") only when the probability is not 100,
-        // so a pattern that does not use probability is saved exactly as before.
+        // v0.6 appends tagged fields (see stepTags) only when they are not the default, so a pattern that does not
+        // use them is saved exactly as before.
         if (i) out += ',';
         const bool hasProb = steps_[i].prob != 100;
         if (steps_[i].rest) out += hasProb ? "r:" + std::to_string((int) steps_[i].prob) : std::string("r");
@@ -257,6 +391,7 @@ std::string StepSequencer::serialize() const
             out += std::to_string((int) steps_[i].note) + ":" + std::to_string((int) steps_[i].vel);
             if (hasProb) out += ":" + std::to_string((int) steps_[i].prob);
         }
+        out += stepTags(steps_[i]);
     }
     return out;
 }
@@ -272,23 +407,46 @@ void StepSequencer::deserialize(const std::string& text)
         size_t end = text.find(',', pos);
         if (end == std::string::npos) end = text.size();
         const std::string tok = text.substr(pos, end - pos);
+
+        // split the token at ':'. Field 0 is the note (or "r"); then up to two plain numbers (velocity, probability; a rest
+        // has only the probability); anything that starts with a letter is a v0.6 tag.
+        std::vector<std::string> fields;
+        for (size_t a = 0; a <= tok.size();)
+        {
+            size_t b = tok.find(':', a);
+            if (b == std::string::npos) b = tok.size();
+            fields.push_back(tok.substr(a, b - a));
+            a = b + 1;
+        }
+
         SeqStep s;
+        auto isTag = [](const std::string& f) { return !f.empty() && std::isalpha((unsigned char) f[0]); };
         if (!tok.empty() && tok[0] != 'r')
         {
-            int note = 60, vel = 100, prob = 100;
-            const int got = std::sscanf(tok.c_str(), "%d:%d:%d", &note, &vel, &prob);
-            if (got >= 1)
+            int note = 60;
+            if (std::sscanf(fields[0].c_str(), "%d", &note) == 1)
             {
                 s.note = (uint8_t) std::max(0, std::min(127, note));
-                s.vel = (uint8_t) std::max(1, std::min(127, vel));
-                s.prob = (uint8_t) std::max(0, std::min(100, prob)); // stays 100 when the token has no third field
                 s.rest = false;
+                int vel = 100, prob = 100, numbers = 0;
+                for (size_t f = 1; f < fields.size(); ++f)
+                {
+                    if (isTag(fields[f])) { applyTag(s, fields[f]); continue; }
+                    if (numbers == 0 && std::sscanf(fields[f].c_str(), "%d", &vel) == 1) ++numbers;
+                    else if (numbers == 1 && std::sscanf(fields[f].c_str(), "%d", &prob) == 1) ++numbers;
+                }
+                s.vel = (uint8_t) std::max(1, std::min(127, vel));
+                s.prob = (uint8_t) std::max(0, std::min(100, prob)); // stays 100 when the token has no probability field
             }
         }
         else if (!tok.empty())
         {
-            int prob = 100;
-            if (std::sscanf(tok.c_str(), "r:%d", &prob) == 1) s.prob = (uint8_t) std::max(0, std::min(100, prob));
+            for (size_t f = 1; f < fields.size(); ++f)
+            {
+                int prob = 100;
+                if (isTag(fields[f])) applyTag(s, fields[f]);
+                else if (std::sscanf(fields[f].c_str(), "%d", &prob) == 1) s.prob = (uint8_t) std::max(0, std::min(100, prob));
+            }
         }
         steps_[len_++] = s;
         pos = end + 1;
@@ -315,6 +473,7 @@ void StepSequencer::resetTransport()
     wasRunning_ = false;
     held_ = false;
     gateOffPpq_ = -1.0;
+    ratNext_ = ratTotal_ = 0;
     displayIdx_.store(-1, std::memory_order_relaxed);
     running_.store(false, std::memory_order_relaxed);
 }
@@ -330,6 +489,7 @@ int StepSequencer::process(double sr, int numSamples, const SeqHostInfo& h, cons
     auto releaseHeld = [&](int offset) {
         if (held_) { emit(offset, false, heldNote_, 0); held_ = false; }
         gateOffPpq_ = -1.0;
+        ratNext_ = ratTotal_ = 0; // repeats of a ratcheted step that have not started yet are cancelled with its note
     };
 
     bool running = false;
@@ -375,15 +535,25 @@ int StepSequencer::process(double sr, int numSamples, const SeqHostInfo& h, cons
     const uint64_t key = s.seed > 0 ? mix64((uint64_t) s.seed) : runKey_;
     const double globalProb = std::max(0.0, std::min(1.0, (double) s.prob));
 
-    long long k = (long long) std::ceil(ppq0 / stepLen - eps); // first step boundary at or after the block start
+    // v0.6 swing (MPC style): every second step (odd step counter) starts late. 50 % = straight, 66.7 % = a third of a
+    // step late (triplet feel), 75 % = half a step late. A step lasts until the next one starts.
+    const double swing = std::max(50.0, std::min(75.0, (double) s.swing));
+    const double delay = (swing - 50.0) / 50.0 * stepLen;
+    auto stepStart = [&](long long q) { return (double) q * stepLen + ((q & 1) ? delay : 0.0); };
+
+    long long k = (long long) std::ceil((ppq0 - eps - delay) / stepLen); // first step that can start in this block
+    while (stepStart(k) < ppq0 - eps) ++k; // (an even step before the block start belongs to the previous block)
     for (;;)
     {
-        const double b = (double) k * stepLen;
+        const double b = stepStart(k);
         const bool haveB = b < ppq1 - eps;
         const bool haveG = held_ && gateOffPpq_ >= 0.0 && gateOffPpq_ < ppq1 - eps;
-        if (!haveB && !haveG) break;
+        const double rAt = ratBase_ + (double) ratNext_ * ratSub_;
+        const bool haveR = ratNext_ < ratTotal_ && rAt < ppq1 - eps;
+        if (!haveB && !haveG && !haveR) break;
 
-        if (haveG && (!haveB || gateOffPpq_ < b))
+        // whichever comes first; at a tie the note-off goes before the next note-on
+        if (haveG && (!haveB || gateOffPpq_ < b) && (!haveR || gateOffPpq_ <= rAt))
         {
             emit(toOffset(gateOffPpq_), false, heldNote_, 0);
             held_ = false;
@@ -391,12 +561,29 @@ int StepSequencer::process(double sr, int numSamples, const SeqHostInfo& h, cons
             continue;
         }
 
+        if (haveR && (!haveB || rAt < b))
+        {
+            // v0.6 ratchet: the next repeat of the current step
+            const int roff = toOffset(rAt);
+            if (held_) { emit(roff, false, heldNote_, 0); held_ = false; }
+            emit(roff, true, ratNote_, ratVel_);
+            held_ = true;
+            heldNote_ = ratNote_;
+            gateOffPpq_ = ratGate_ < 0.999 ? rAt + ratGate_ * ratSub_ : -1.0;
+            ++ratNext_;
+            continue;
+        }
+
         const int off = toOffset(b);
-        if (held_) { emit(off, false, heldNote_, 0); held_ = false; gateOffPpq_ = -1.0; }
+        if (held_) { emit(off, false, heldNote_, 0); held_ = false; }
+        gateOffPpq_ = -1.0;
+        ratNext_ = ratTotal_ = 0;
         const int idx = stepIndexFor(k, loop, s.direction, s.pendRepeat, key);
         displayIdx_.store(idx, std::memory_order_relaxed);
         const SeqStep& st = steps_[idx];
         bool fire = !st.rest && !s.mute;
+        if (fire && st.condB > 1) // v0.6 trigger condition ("pass a of every b"); a step that is not due behaves like a rest
+            fire = conditionPasses(st.condA, st.condB, passIndex(k, loop, s.direction, s.pendRepeat));
         if (fire)
         {
             const double p = (st.prob / 100.0) * globalProb;
@@ -404,12 +591,28 @@ int StepSequencer::process(double sr, int numSamples, const SeqHostInfo& h, cons
         }
         if (fire)
         {
-            // v0.5: the note that sounds is the stored note, transposed, then snapped to the scale (if one is set)
-            const int played = playedNote(st.note, s.transpose, s.root, s.scale);
-            emit(off, true, played, st.vel);
+            // v0.6 octave jump: its own roll (same key as the probability roll, different stream)
+            int shift = 0;
+            if (st.octChance > 0 && unitRandom(key, 3, k) < st.octChance / 100.0)
+                shift = octaveShift(s.octMode, unitRandom(key, 4, k));
+            // v0.5: the note that sounds is the stored note, transposed (and octave-jumped), then snapped to the scale
+            const int played = playedNote(st.note, s.transpose + shift, s.root, s.scale);
+            int vel = st.vel;
+            if (st.accent) vel = std::min(127, vel + (int) std::lround(std::max(0.f, std::min(1.f, s.accent)) * 127.0));
+
+            const double dur = delay == 0.0 ? stepLen : stepStart(k + 1) - b; // how long until the next step starts
+            const int repeats = std::max(1, std::min(kMaxRatchet, (int) st.ratchet));
+            const double sub = dur / repeats;
+            const double gate = st.gate > 0 ? st.gate / 100.0 : (double) s.gate; // a step's own gate overrides the GATE knob
+            emit(off, true, played, vel);
             held_ = true;
             heldNote_ = played;
-            gateOffPpq_ = s.gate < 0.999f ? b + (double) s.gate * stepLen : -1.0;
+            gateOffPpq_ = gate < 0.999 ? b + gate * sub : -1.0;
+            if (repeats > 1)
+            {
+                ratBase_ = b; ratSub_ = sub; ratGate_ = gate;
+                ratNext_ = 1; ratTotal_ = repeats; ratNote_ = played; ratVel_ = vel;
+            }
         }
         ++k;
     }

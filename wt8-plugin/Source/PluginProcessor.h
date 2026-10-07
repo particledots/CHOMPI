@@ -58,7 +58,10 @@ class WT8AudioProcessor : public juce::AudioProcessor
     StepSequencer seq_;
     std::atomic<bool> seqRecording_{false};
     std::atomic<int> seqTranspose_{0};
-    SeqEvent seqEvents_[64];
+    // Room for the worst case a host can produce (very fast tempo, huge block, 1/32T steps with 8 repeats: ~540 events
+    // in one block, see seq_test T27). An event that did not fit would be a lost note-off, i.e. a stuck note.
+    static constexpr int kSeqEventCapacity = 2048;
+    SeqEvent seqEvents_[kSeqEventCapacity];
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(WT8AudioProcessor)
 };

@@ -307,7 +307,153 @@ int main()
         printf("v0.5 scale + transpose: %s\n", v5Ok ? "ok" : "FAILED");
     }
 
-    bool ok = seqOk && v4Ok && v5Ok && finite && peak > 0.02f && peak <= 1.5f && held > 0.005f && tail < held * 0.05f && std::fabs(cutoff - 0.2f) < 0.01f;
+
+    // --- v0.6: per-step expression and swing through the real processor ---
+    bool v6Ok = true;
+    {
+        auto setPlain = [](WT8AudioProcessor& pr, const char* id, float plain) {
+            auto* p = dynamic_cast<juce::RangedAudioParameter*>(pr.apvts.getParameter(id));
+            p->setValueNotifyingHost(p->convertTo0to1(plain));
+        };
+        auto getPlain = [](WT8AudioProcessor& pr, const char* id) { return (float) *pr.apvts.getRawParameterValue(id); };
+        auto check = [&](bool cond, const char* what) { printf("  %s: %s\n", cond ? "ok  " : "FAIL", what); v6Ok = v6Ok && cond; };
+        auto makeProc = [&]() {
+            auto pr = std::make_unique<WT8AudioProcessor>();
+            pr->setPlayConfigDetails(0, 2, sr, bs); pr->prepareToPlay(sr, bs);
+            return pr;
+        };
+        auto render = [&](WT8AudioProcessor& pr, int blocks) { // returns the left channel
+            std::vector<float> out; juce::AudioBuffer<float> b(2, bs); juce::MidiBuffer none;
+            for (int blk = 0; blk < blocks; ++blk) { b.clear(); pr.processBlock(b, none); for (int i = 0; i < bs; ++i) out.push_back(b.getSample(0, i)); }
+            return out;
+        };
+        // how many separate note starts are in a signal: windows of 64 samples whose level rises from below to above a threshold
+        auto onsets = [&](const std::vector<float>& x, size_t from, size_t to) {
+            const size_t w = 64; float peak = 0;
+            for (float v : x) peak = std::fmax(peak, std::fabs(v)); // one reference level for the whole render
+            const float hi = peak * 0.30f, lo = peak * 0.08f; int n = 0; bool armed = true;
+            for (size_t a = from; a + w <= to && a + w <= x.size(); a += w)
+            {
+                float lvl = 0; for (size_t i = a; i < a + w; ++i) lvl = std::fmax(lvl, std::fabs(x[i]));
+                if (armed && lvl > hi) { ++n; armed = false; } else if (lvl < lo) armed = true;
+            }
+            return n;
+        };
+
+        auto d = makeProc();
+        check(getPlain(*d, "seq_swing") == 50.f && std::fabs(getPlain(*d, "seq_accent") - 0.3f) < 1e-5f && getPlain(*d, "seq_octmode") == 0.f, "new parameters default to straight / accent 0.3 / up 1 octave");
+        check(d->apvts.getParameter("seq_swing")->getVersionHint() == 4 && d->apvts.getParameter("seq_accent")->getVersionHint() == 4 && d->apvts.getParameter("seq_octmode")->getVersionHint() == 4,
+              "new parameters use version hint 4");
+        check(d->apvts.getParameter("seq_scale")->getVersionHint() == 3 && d->apvts.getParameter("seq_prob")->getVersionHint() == 2 && d->apvts.getParameter("seq_gate")->getVersionHint() == 1,
+              "older parameters keep their version hints");
+        if (auto* oc = dynamic_cast<juce::AudioParameterChoice*>(d->apvts.getParameter("seq_octmode")))
+            check(oc->choices.size() == 6 && oc->choices[0] == "Up 1 octave" && oc->choices[5] == "Up or down 2 octaves", "octave-jump menu: 6 modes");
+        else check(false, "seq_octmode is a choice parameter");
+
+        // a ratcheted step really comes out as separate notes: 1 step of 1/4 (22050 samples at 44.1 kHz / 120 bpm), 4 repeats, short gate
+        for (int rep : {1, 4})
+        {
+            auto p = makeProc(); p->sequencer().recordNote(60, 100); p->sequencer().setRatchet(0, rep);
+            setPlain(*p, "seq_div", 0.f); setPlain(*p, "seq_gate", 0.3f); setPlain(*p, "release", 0.f);
+            p->apvts.getParameter("seq_play")->setValueNotifyingHost(1.f);
+            const auto x = render(*p, 44); // 44 x 512 = 22528 samples = one step plus a little
+            const int n = onsets(x, 0, 22050);
+            char what[96]; snprintf(what, sizeof what, "ratchet %d through the processor: %d separate note starts in the step (want %d)", rep, n, rep);
+            check(n == rep, what);
+        }
+        // swing moves the odd step: pattern C C, 1/16 (5512.5 samples at 44.1 kHz). The first note after start-up fades in
+        // slowly (engine smoothing), so the START of the second note is what is measured, straight vs swung 75 %
+        // (step 2 half a step = 2756 samples later).
+        {
+            auto secondNoteStart = [&](float swing) {
+                auto p = makeProc(); p->sequencer().recordNote(60, 100); p->sequencer().recordNote(60, 100);
+                setPlain(*p, "seq_div", 2.f); setPlain(*p, "seq_gate", 0.25f); setPlain(*p, "seq_swing", swing);
+                p->apvts.getParameter("seq_play")->setValueNotifyingHost(1.f);
+                const auto x = render(*p, 30); // 15360 samples
+                float peak = 0; for (float v : x) peak = std::fmax(peak, std::fabs(v));
+                int found = 0; size_t second = 0; bool armed = true; const size_t w = 32;
+                for (size_t a = 0; a + w <= x.size(); a += w)
+                {
+                    float lvl = 0; for (size_t i = a; i < a + w; ++i) lvl = std::fmax(lvl, std::fabs(x[i]));
+                    if (armed && lvl > peak * 0.30f) { if (found == 1) second = a; ++found; armed = false; } else if (lvl < peak * 0.05f) armed = true;
+                }
+                return found >= 2 ? (double) second : -1.0;
+            };
+            const double straight = secondNoteStart(50.f), swung = secondNoteStart(75.f);
+            char what[160]; snprintf(what, sizeof what, "second note starts at sample %.0f straight (want ~5512) and %.0f swung 75 %% (want ~8268): %.0f later (want ~2756)", straight, swung, swung - straight);
+            check(straight > 0 && std::fabs(straight - 5512.5) < 200.0 && std::fabs((swung - straight) - 2756.25) < 100.0, what);
+        }
+        // accent makes the accented note louder; the amount is a parameter
+        {
+            auto loudness = [&](float accentAmount) {
+                auto p = makeProc(); p->sequencer().recordNote(60, 50); p->sequencer().toggleAccent(0);
+                setPlain(*p, "seq_div", 0.f); setPlain(*p, "seq_gate", 1.f); setPlain(*p, "seq_accent", accentAmount);
+                p->apvts.getParameter("seq_play")->setValueNotifyingHost(1.f);
+                const auto x = render(*p, 20); float pk = 0; for (float v : x) pk = std::fmax(pk, std::fabs(v)); return pk;
+            };
+            const float quiet = loudness(0.f), loud = loudness(0.8f);
+            char what[96]; snprintf(what, sizeof what, "accent 0.8 is louder than accent 0 (peak %.3f vs %.3f)", loud, quiet);
+            check(loud > quiet * 1.4f && quiet > 0.005f, what);
+        }
+        // octave jump: stored 60, up one octave. With chance 100 % the energy sits at MIDI 72 (the 2nd harmonic of MIDI 60 is there too,
+        // so the same measurement at chance 0 % is the control: there the energy must sit at MIDI 60).
+        {
+            auto ratio72to60 = [&](int chance) {
+                auto p = makeProc(); p->sequencer().recordNote(60, 100); p->sequencer().setOctChance(0, chance);
+                setPlain(*p, "seq_div", 0.f); setPlain(*p, "seq_gate", 1.f); setPlain(*p, "seq_octmode", 0.f); setPlain(*p, "seq_seed", 3.f);
+                p->apvts.getParameter("seq_play")->setValueNotifyingHost(1.f);
+                const auto x = render(*p, 130);
+                auto mag = [&](int note) { const double f = 261.63 * std::pow(2.0, (note - 60) / 12.0), w = 2.0 * 3.14159265358979323846 * f / sr; double re = 0, im = 0;
+                    for (size_t i = (size_t) (0.4 * sr); i < (size_t) (1.4 * sr) && i < x.size(); ++i) { re += x[i] * std::cos(w * (double) i); im -= x[i] * std::sin(w * (double) i); } return std::sqrt(re * re + im * im); };
+                return mag(72) / std::fmax(1e-9, mag(60));
+            };
+            const double jumped = ratio72to60(100), plain = ratio72to60(0);
+            char what[128]; snprintf(what, sizeof what, "octave jump: energy at MIDI 72 vs 60 is %.1fx with chance 100 %% and %.2fx with chance 0 %% (want > 3 and < 1)", jumped, plain);
+            check(jumped > 3.0 && plain < 1.0, what);
+        }
+        // trigger condition: step 1 of a 2-step pattern with "pass 2 of every 2": on the first pass it is silent, on the second it plays
+        {
+            auto p = makeProc(); p->sequencer().recordNote(60, 100); p->sequencer().setCondition(0, 2, 2);
+            setPlain(*p, "seq_div", 0.f); setPlain(*p, "seq_gate", 0.3f); setPlain(*p, "seq_loop", 1.f); // loop of 1 step: every step is a new pass
+            p->apvts.getParameter("seq_play")->setValueNotifyingHost(1.f);
+            const auto x = render(*p, 130); // 130 x 512 = 66560 samples: 3 steps of 22050 samples = 3 passes
+            const int pass1 = onsets(x, 0, 22050), pass2 = onsets(x, 22050, 44100), pass3 = onsets(x, 44100, 66150);
+            char what[96]; snprintf(what, sizeof what, "condition 2 of 2: note starts in passes 1, 2, 3 = %d, %d, %d (want 0, 1, 0)", pass1, pass2, pass3);
+            check(pass1 == 0 && pass2 == 1 && pass3 == 0, what);
+        }
+        // everything runs finite and bounded, at a large block size and a fast tempo as well
+        {
+            auto p = makeProc(); for (int n : {60, 64, 67, 72}) p->sequencer().recordNote(n, 100);
+            for (int i = 0; i < 4; ++i) { p->sequencer().setRatchet(i, 8); p->sequencer().setOctChance(i, 50); p->sequencer().toggleAccent(i); p->sequencer().setCondition(i, 1, 2); p->sequencer().setStepGate(i, 60); }
+            setPlain(*p, "seq_div", 7.f); setPlain(*p, "seq_swing", 70.f); setPlain(*p, "seq_octmode", 5.f); setPlain(*p, "seq_scale", 6.f);
+            p->apvts.getParameter("seq_play")->setValueNotifyingHost(1.f);
+            juce::AudioBuffer<float> big(2, 4096); juce::MidiBuffer none; float pk = 0; bool fin = true;
+            for (int blk = 0; blk < 40; ++blk) { big.clear(); p->processBlock(big, none); for (int i = 0; i < 4096; ++i) { const float v = big.getSample(0, i); if (!std::isfinite(v)) fin = false; pk = std::fmax(pk, std::fabs(v)); } }
+            check(fin && pk > 0.01f && pk <= 1.5f, "all v0.6 features at once, 4096-sample blocks: finite audio, sane level");
+        }
+        // save / reopen: settings and the per-step values survive; a v0.5 state loads with the defaults and an untouched pattern
+        {
+            auto src = makeProc(); setPlain(*src, "seq_swing", 62.5f); setPlain(*src, "seq_accent", 0.7f); setPlain(*src, "seq_octmode", 4.f);
+            src->sequencer().deserialize("60:100:75:x3:g50:a:o30:c2/3,r:x2,67:100");
+            juce::MemoryBlock saved; src->getStateInformation(saved);
+            auto dst = makeProc(); dst->setStateInformation(saved.getData(), (int) saved.getSize());
+            check(std::fabs(getPlain(*dst, "seq_swing") - 62.5f) < 1e-3f && std::fabs(getPlain(*dst, "seq_accent") - 0.7f) < 1e-3f && getPlain(*dst, "seq_octmode") == 4.f, "v0.6 settings restore");
+            check(dst->sequencer().serialize() == "60:100:75:x3:g50:a:o30:c2/3,r:x2,67:100", "per-step v0.6 values restore");
+            auto xml = juce::AudioProcessor::getXmlFromBinary(saved.getData(), (int) saved.getSize());
+            for (auto* id : {"seq_swing", "seq_accent", "seq_octmode"})
+                while (auto* ch = xml->getChildByAttribute("id", id)) xml->removeChildElement(ch, true);
+            xml->setAttribute("sequence", "60:100:75,r,67:80");
+            juce::MemoryBlock oldState; juce::AudioProcessor::copyXmlToBinary(*xml, oldState);
+            auto target = makeProc(); setPlain(*target, "seq_swing", 70.f); setPlain(*target, "seq_accent", 0.9f); setPlain(*target, "seq_octmode", 3.f);
+            target->setStateInformation(oldState.getData(), (int) oldState.getSize());
+            check(getPlain(*target, "seq_swing") == 50.f && std::fabs(getPlain(*target, "seq_accent") - 0.3f) < 1e-5f && getPlain(*target, "seq_octmode") == 0.f,
+                  "v0.5 state: missing v0.6 settings go to their defaults (straight, accent 0.3, up 1 octave)");
+            check(target->sequencer().serialize() == "60:100:75,r,67:80", "v0.5 pattern loads unchanged");
+        }
+        printf("v0.6 per-step expression + swing: %s\n", v6Ok ? "ok" : "FAILED");
+    }
+
+    bool ok = seqOk && v4Ok && v5Ok && v6Ok && finite && peak > 0.02f && peak <= 1.5f && held > 0.005f && tail < held * 0.05f && std::fabs(cutoff - 0.2f) < 0.01f;
     printf(ok ? "PASS\n" : "FAIL\n");
     return ok ? 0 : 1;
 }
