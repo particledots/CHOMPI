@@ -75,14 +75,23 @@ juce_add_plugin(WT8
   AU_MAIN_TYPE kAudioUnitType_MusicDevice
   COPY_PLUGIN_AFTER_BUILD ${WT8_COPY})
 
-target_sources(WT8 PRIVATE Source/PluginProcessor.cpp Source/PluginProcessor.h)
+target_sources(WT8 PRIVATE Source/PluginProcessor.cpp Source/PluginProcessor.h Source/PluginEditor.cpp Source/PluginEditor.h)
 target_compile_definitions(WT8 PUBLIC JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0)
 target_link_libraries(WT8 PRIVATE WT8Data wt8_engine
   juce::juce_audio_utils juce::juce_audio_processors
   PUBLIC juce::juce_recommended_config_flags juce::juce_recommended_lto_flags juce::juce_recommended_warning_flags)
 
 # Headless test that drives the actual plugin object (processBlock, MIDI, state)
-add_executable(plugin_test tests/plugin_test.cpp Source/PluginProcessor.cpp)
+add_executable(plugin_test tests/plugin_test.cpp Source/PluginProcessor.cpp Source/PluginEditor.cpp)
 target_include_directories(plugin_test PRIVATE Source)
 target_compile_definitions(plugin_test PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0)
 target_link_libraries(plugin_test PRIVATE WT8Data wt8_engine juce::juce_audio_processors juce::juce_recommended_config_flags)
+
+# Optional: render the editor offscreen to a PNG (used on Linux to check layout without a Mac)
+option(WT8_EDITOR_SNAPSHOT "Build editor_snapshot (renders the editor to a PNG)" OFF)
+if(WT8_EDITOR_SNAPSHOT)
+  add_executable(editor_snapshot tests/editor_snapshot.cpp Source/PluginProcessor.cpp Source/PluginEditor.cpp)
+  target_include_directories(editor_snapshot PRIVATE Source)
+  target_compile_definitions(editor_snapshot PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0)
+  target_link_libraries(editor_snapshot PRIVATE WT8Data wt8_engine juce::juce_audio_utils juce::juce_audio_processors juce::juce_recommended_config_flags)
+endif()

@@ -12,7 +12,7 @@ in Logic** — that is the next step.
 ## What's in it
 - 8 voices: wavetable oscillator (7 tables x 33 frames) -> resonant filter -> amp envelope
 - 2 LFOs (pitch, filter), delay <-> reverb macro, compressor <-> saturation macro, pan, gain
-- Generic parameter UI for now (every control as a slider, automatable in Logic). A custom panel comes later.
+- Custom panel (v0.2): knobs grouped by signal flow (oscillator, envelope, filter, LFO, effects, output), value readouts, double-click a knob to reset it, double-click a readout to type a value, resizable window. All controls are automatable in Logic. No wavetable display yet.
 - Not yet: the 32-step sequencer, MIDI clock, presets (beyond Logic's own plugin presets), user wavetables.
 
 ## Build on your Mac (Apple silicon or Intel)

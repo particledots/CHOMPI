@@ -1,5 +1,6 @@
 #include "PluginProcessor.h"
 #include "WT8Engine.h"
+#include "PluginEditor.h"
 #include <BinaryData.h>
 
 namespace
@@ -140,7 +141,7 @@ void WT8AudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
 
 juce::AudioProcessorEditor* WT8AudioProcessor::createEditor()
 {
-    return new juce::GenericAudioProcessorEditor(*this);
+    return new WT8Editor(*this);
 }
 
 void WT8AudioProcessor::getStateInformation(juce::MemoryBlock& destData)
