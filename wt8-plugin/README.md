@@ -34,7 +34,7 @@ Validate as an Audio Unit: `auval -v aumu Ipmo Ptdt`. Then in Logic: a Software 
 Instrument slot -> AU Instruments -> particledots -> ipmohc. If it doesn't show up, restart Logic
 (Logic Pro > Settings > Plug-in Manager > Reset & Rescan Selection).
 
-## Step sequencer (v0.3)
+## Step sequencer (v0.4)
 32 steps, timed from Logic's tempo. Modelled on the CHOMPI WAVE sequencer (record notes as steps, rests, loop, gate, mute).
 - **Record:** press REC, then play notes: each note becomes the next step (with its velocity). REST adds a gap, DEL removes the last step, CLEAR empties the pattern. While REC is armed the pattern does not play.
 - **Edit:** click a step to toggle note/rest (clicking past the end extends the pattern); drag a step up/down or use the mouse wheel to change its pitch.
@@ -42,7 +42,12 @@ Instrument slot -> AU Instruments -> particledots -> ipmohc. If it doesn't show 
 - **STEP** = step length: 1/4, 1/8, 1/16, 1/32 and triplets (1/4T ... 1/32T). **GATE** = how much of each step the note sounds (100% = legato). **MUTE** silences it (immediately, including a sounding note).
 - Sequencer notes and played notes are separate sources, as in the firmware: you can play over the pattern.
 - The pattern is saved with the Logic project. A project never starts playing the sequencer just because it was opened (PLAY is switched off on load).
-- All sequencer settings (PLAY, SYNC, STEP, GATE, MUTE) are automatable parameters. Tests: `tests/seq_test.cpp` (exact sample timing, block-size independence, relocation, gate, mute, save/restore).
+- **DIRECTION** (v0.4): Forward, Backward, Pendulum or Random. Pendulum plays 1-2-3-2-1-2-3...; switch **ENDS x2** on and the two end steps play twice (1-2-3-3-2-1-1-2-3...). Random picks any step each time (the same step can come up twice in a row). With SYNC = Logic the step is always worked out from Logic's position, so jumping around in the project gives the same result as playing up to that point. The pattern repeats every N steps (Forward, Backward), 2N steps (Pendulum with ENDS x2) or 2N-2 steps (Pendulum without it), where N is the loop length; it lines up with Logic's bars whenever that is a whole number of bars (16 steps of 1/16 = one bar), otherwise it drifts against them, which is the off-kilter effect.
+- **LOOP** (v0.4): plays only the first N steps of the pattern (ALL = the whole pattern; a number larger than the pattern also plays the whole pattern). The recorded pattern is not changed, so a 7-step loop can run against a longer pattern.
+- **Probability** (v0.4): every step has its own chance of playing, and the **PROB** knob scales all of them (global x step). A step that misses its roll behaves like a rest: it stays silent and the previous note still ends on time. Switch the grid to the **PROB** lane (EDIT: PITCH / PROB) to see and edit the per-step values: drag a step up/down (1 pixel = 1 %) or use the mouse wheel (5 % per notch); double-click sets it back to 100 %. Rests have no probability.
+- **SEED** (v0.4): RANDOM = different choices every time playback starts (and on every pass of a Logic cycle). A number = the same choices every time, so a bounce matches what you heard. Random direction uses the same seed.
+- Saving: the pattern is saved as before (`60:100,r,67:80`); a step with a probability other than 100 gets a third number (`60:100:75`). Projects saved by v0.3 load unchanged, and a setting that did not exist yet when the project was saved comes back at its default (PROB 100 %, Forward, LOOP ALL, SEED RANDOM).
+- All sequencer settings (PLAY, SYNC, STEP, GATE, MUTE, LOOP, DIRECTION, ENDS x2, PROB, SEED) are automatable parameters. The v0.4 parameters have AU version hint 2 so Logic keeps the order of the older ones. Tests: `tests/seq_test.cpp` (exact sample timing, block-size independence, relocation, gate, mute, save/restore, direction orders, loop length, probability statistics, seed repeatability, bar-locking) and `tests/plugin_test.cpp` (the same options through the real plugin, saving, loading a v0.3-style state).
 
 ## Parameters (all map to the CHOMPI WAVE panel)
 | Parameter | Range / default | WAVE panel control |

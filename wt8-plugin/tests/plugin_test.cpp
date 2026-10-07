@@ -92,7 +92,81 @@ int main()
         seqOk = seqOk && rp.sequencer().serialize() == "60:100,r,67:100" && *rp.apvts.getRawParameterValue("seq_play") < 0.5f;
     }
 
-    bool ok = seqOk && finite && peak > 0.02f && peak <= 1.5f && held > 0.005f && tail < held * 0.05f && std::fabs(cutoff - 0.2f) < 0.01f;
+    // --- v0.4 sequencer options through the real processor ---
+    bool v4Ok = true;
+    {
+        auto setPlain = [](WT8AudioProcessor& pr, const char* id, float plain) {
+            auto* p = dynamic_cast<juce::RangedAudioParameter*>(pr.apvts.getParameter(id));
+            p->setValueNotifyingHost(p->convertTo0to1(plain));
+        };
+        auto getPlain = [](WT8AudioProcessor& pr, const char* id) { return (float) *pr.apvts.getRawParameterValue(id); };
+        auto check = [&](bool cond, const char* what) { printf("  %s: %s\n", cond ? "ok  " : "FAIL", what); v4Ok = v4Ok && cond; };
+
+        // defaults reproduce v0.3 behaviour, and the new parameters sort after the old ones in Logic (version hint 2)
+        WT8AudioProcessor d;
+        check(getPlain(d, "seq_loop") == 0.f && getPlain(d, "seq_dir") == 0.f && getPlain(d, "seq_pendrep") == 0.f
+              && getPlain(d, "seq_prob") == 1.f && getPlain(d, "seq_seed") == 0.f, "new parameters default to v0.3 behaviour");
+        check(d.apvts.getParameter("seq_prob")->getVersionHint() == 2 && d.apvts.getParameter("seq_dir")->getVersionHint() == 2
+              && d.apvts.getParameter("seq_loop")->getVersionHint() == 2 && d.apvts.getParameter("seq_seed")->getVersionHint() == 2
+              && d.apvts.getParameter("seq_pendrep")->getVersionHint() == 2, "new parameters use version hint 2");
+        check(d.apvts.getParameter("seq_gate")->getVersionHint() == 1 && d.apvts.getParameter("table")->getVersionHint() == 1,
+              "existing parameters keep version hint 1");
+
+        // probability 0 stops the sequence from sounding; direction/loop/seed settings run cleanly
+        WT8AudioProcessor sp; sp.setPlayConfigDetails(0, 2, sr, bs); sp.prepareToPlay(sr, bs);
+        for (int n : {60, 64, 67, 72}) sp.sequencer().recordNote(n, 100);
+        auto runBlocks = [&](WT8AudioProcessor& pr, int blocks, bool& fin) {
+            float pk = 0; juce::MidiBuffer none; juce::AudioBuffer<float> b(2, bs);
+            for (int blk = 0; blk < blocks; ++blk)
+            {
+                b.clear(); pr.processBlock(b, none);
+                for (int i = 0; i < bs; ++i) { const float v = b.getSample(0, i); if (!std::isfinite(v)) fin = false; pk = std::fmax(pk, std::fabs(v)); }
+            }
+            return pk;
+        };
+        bool fin = true;
+        setPlain(sp, "seq_prob", 0.f);
+        sp.apvts.getParameter("seq_play")->setValueNotifyingHost(1.f);
+        const float silent = runBlocks(sp, 80, fin);
+        check(silent < 1e-4f, "probability 0%: sequence is silent");
+        setPlain(sp, "seq_prob", 1.f);
+        const float loud = runBlocks(sp, 80, fin);
+        check(loud > 0.02f, "probability back to 100%: sequence sounds");
+        float worst = 0;
+        for (int dir = 0; dir < 4; ++dir)
+        {
+            setPlain(sp, "seq_dir", (float) dir); setPlain(sp, "seq_pendrep", (float) (dir & 1)); setPlain(sp, "seq_loop", (float) (dir * 3));
+            setPlain(sp, "seq_seed", (float) (dir * 7)); setPlain(sp, "seq_prob", 0.7f);
+            worst = std::fmax(worst, runBlocks(sp, 60, fin));
+        }
+        check(fin && worst > 0.02f && worst <= 1.5f, "all directions / loop / seed settings play finite audio");
+
+        // new settings and per-step probability survive a save and reopen
+        WT8AudioProcessor src; src.sequencer().deserialize("60:100:75,r,67:100:30");
+        setPlain(src, "seq_dir", 2.f); setPlain(src, "seq_pendrep", 1.f); setPlain(src, "seq_loop", 5.f); setPlain(src, "seq_prob", 0.3f); setPlain(src, "seq_seed", 7.f);
+        juce::MemoryBlock saved; src.getStateInformation(saved);
+        WT8AudioProcessor dst; dst.setStateInformation(saved.getData(), (int) saved.getSize());
+        check(getPlain(dst, "seq_dir") == 2.f && getPlain(dst, "seq_pendrep") == 1.f && getPlain(dst, "seq_loop") == 5.f
+              && std::fabs(getPlain(dst, "seq_prob") - 0.3f) < 1e-4f && getPlain(dst, "seq_seed") == 7.f, "v0.4 settings restore");
+        check(dst.sequencer().serialize() == "60:100:75,r,67:100:30", "per-step probabilities restore");
+
+        // a state saved by v0.3 (no v0.4 parameters, plain "note:vel" pattern) loads, and does not inherit this instance's settings
+        auto xml = juce::AudioProcessor::getXmlFromBinary(saved.getData(), (int) saved.getSize());
+        for (auto* id : {"seq_loop", "seq_dir", "seq_pendrep", "seq_prob", "seq_seed"})
+            while (auto* ch = xml->getChildByAttribute("id", id)) xml->removeChildElement(ch, true);
+        xml->setAttribute("sequence", "60:100,r,67:80");
+        juce::MemoryBlock oldState; juce::AudioProcessor::copyXmlToBinary(*xml, oldState);
+        WT8AudioProcessor target;
+        setPlain(target, "seq_dir", 3.f); setPlain(target, "seq_prob", 0.2f); setPlain(target, "seq_seed", 5.f); setPlain(target, "seq_loop", 4.f); setPlain(target, "seq_pendrep", 1.f);
+        target.setStateInformation(oldState.getData(), (int) oldState.getSize());
+        check(getPlain(target, "seq_loop") == 0.f && getPlain(target, "seq_dir") == 0.f && getPlain(target, "seq_pendrep") == 0.f
+              && getPlain(target, "seq_prob") == 1.f && getPlain(target, "seq_seed") == 0.f, "v0.3 state: missing v0.4 parameters go to their defaults");
+        check(target.sequencer().serialize() == "60:100,r,67:80", "v0.3 pattern loads unchanged");
+        check(*target.apvts.getRawParameterValue("seq_play") < 0.5f, "loading never starts playback");
+        printf("v0.4 options: %s\n", v4Ok ? "ok" : "FAILED");
+    }
+
+    bool ok = seqOk && v4Ok && finite && peak > 0.02f && peak <= 1.5f && held > 0.005f && tail < held * 0.05f && std::fabs(cutoff - 0.2f) < 0.01f;
     printf(ok ? "PASS\n" : "FAIL\n");
     return ok ? 0 : 1;
 }

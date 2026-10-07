@@ -111,7 +111,7 @@ void StepGrid::refresh()
     seq_.snapshot(fresh, len, playing);
     bool changed = (len != len_) || (playing != playing_);
     for (int i = 0; i < StepSequencer::kMaxSteps && !changed; ++i)
-        changed = fresh[i].note != steps_[i].note || fresh[i].rest != steps_[i].rest;
+        changed = fresh[i].note != steps_[i].note || fresh[i].rest != steps_[i].rest || fresh[i].prob != steps_[i].prob;
     if (!changed) return;
     for (int i = 0; i < StepSequencer::kMaxSteps; ++i) steps_[i] = fresh[i];
     len_ = len; playing_ = playing;
@@ -148,15 +148,31 @@ void StepGrid::paint(juce::Graphics& g)
         else
         {
             const bool rest = steps_[i].rest;
-            g.setColour(isPlaying ? kAccent : (rest ? juce::Colour(0xff1b1c20) : juce::Colour(0xff2d2f35)));
+            const bool probLane = lane_ == Lane::Prob;
+            // in the PITCH lane the playing step is filled solid; in the PROB lane the fill is the probability bar
+            const bool solid = isPlaying && !probLane;
+            g.setColour(solid ? kAccent : (rest ? juce::Colour(0xff1b1c20) : juce::Colour(0xff2d2f35)));
             g.fillRoundedRectangle(r, 5.0f);
+            if (probLane && !rest)
+            {
+                juce::Path clip; clip.addRoundedRectangle(r, 5.0f);
+                g.saveState();
+                g.reduceClipRegion(clip);
+                const float h = r.getHeight() * steps_[i].prob / 100.0f;
+                g.setColour(kAccent.withAlpha(isPlaying ? 0.85f : 0.42f));
+                g.fillRect(r.getX(), r.getBottom() - h, r.getWidth(), h);
+                g.restoreState();
+            }
             g.setColour(isPlaying ? kAccent : kEdge);
-            g.drawRoundedRectangle(r.reduced(0.5f), 5.0f, 1.0f);
-            g.setColour(isPlaying ? kBg : (rest ? kDim : kText));
+            g.drawRoundedRectangle(r.reduced(0.5f), 5.0f, isPlaying && probLane ? 2.0f : 1.0f);
+            g.setColour(solid ? kBg : (rest ? kDim : kText));
             g.setFont(makeFont(juce::jmax(9.0f, 12.5f * scale), true));
-            g.drawText(rest ? juce::String("-") : noteName(steps_[i].note), r, juce::Justification::centred);
+            if (probLane)
+                g.drawText(rest ? juce::String("-") : juce::String(steps_[i].prob) + "%", r, juce::Justification::centred);
+            else
+                g.drawText(rest ? juce::String("-") : noteName(steps_[i].note), r, juce::Justification::centred);
         }
-        g.setColour(isPlaying ? kBg : kDim.withAlpha(0.8f));
+        g.setColour(isPlaying && lane_ == Lane::Pitch ? kBg : kDim.withAlpha(0.8f));
         g.setFont(makeFont(juce::jmax(7.0f, 8.5f * scale)));
         g.drawText(juce::String(i + 1), r.reduced(4.0f, 2.0f), juce::Justification::topLeft);
     }
@@ -168,6 +184,7 @@ void StepGrid::mouseDown(const juce::MouseEvent& e)
     dragged_ = false;
     dragStartY_ = e.y;
     dragStartNote_ = (dragIdx_ >= 0 && dragIdx_ < len_) ? steps_[dragIdx_].note : 60;
+    dragStartProb_ = (dragIdx_ >= 0 && dragIdx_ < len_) ? steps_[dragIdx_].prob : 100;
 }
 
 void StepGrid::mouseDrag(const juce::MouseEvent& e)
@@ -176,13 +193,14 @@ void StepGrid::mouseDrag(const juce::MouseEvent& e)
     const int dy = dragStartY_ - e.y;
     if (std::abs(dy) > 4) dragged_ = true;
     if (!dragged_) return;
-    seq_.setNote(dragIdx_, juce::jlimit(0, 127, dragStartNote_ + dy / 6));
+    if (lane_ == Lane::Prob) seq_.setProb(dragIdx_, juce::jlimit(0, 100, dragStartProb_ + dy)); // 1 pixel = 1 %
+    else                     seq_.setNote(dragIdx_, juce::jlimit(0, 127, dragStartNote_ + dy / 6));
     refresh();
 }
 
 void StepGrid::mouseUp(const juce::MouseEvent&)
 {
-    if (!dragged_ && dragIdx_ >= 0)
+    if (!dragged_ && dragIdx_ >= 0 && lane_ == Lane::Pitch) // in the PROB lane a plain click does nothing
     {
         seq_.toggleRest(dragIdx_);
         refresh();
@@ -190,11 +208,21 @@ void StepGrid::mouseUp(const juce::MouseEvent&)
     dragIdx_ = -1;
 }
 
+void StepGrid::mouseDoubleClick(const juce::MouseEvent& e)
+{
+    if (lane_ != Lane::Prob) return;
+    const int i = cellAt(e.getPosition());
+    if (i < 0 || i >= len_) return;
+    seq_.setProb(i, 100);
+    refresh();
+}
+
 void StepGrid::mouseWheelMove(const juce::MouseEvent& e, const juce::MouseWheelDetails& w)
 {
     const int i = cellAt(e.getPosition());
     if (i < 0 || i >= len_ || steps_[i].rest || w.deltaY == 0.0f) return;
-    seq_.setNote(i, juce::jlimit(0, 127, (int) steps_[i].note + (w.deltaY > 0 ? 1 : -1)));
+    if (lane_ == Lane::Prob) seq_.setProb(i, juce::jlimit(0, 100, (int) steps_[i].prob + (w.deltaY > 0 ? 5 : -5)));
+    else                     seq_.setNote(i, juce::jlimit(0, 127, (int) steps_[i].note + (w.deltaY > 0 ? 1 : -1)));
     refresh();
 }
 
@@ -257,6 +285,14 @@ WT8Editor::Knob& WT8Editor::addKnob(const juce::String& id, const juce::String& 
             };
             s.valueFromTextFunction = [](const juce::String& t) { return (double) t.getFloatValue(); };
             break;
+        case Kind::LoopLength: // 0 = the whole pattern
+            s.textFromValueFunction = [](double v) { const int n = juce::roundToInt(v); return n == 0 ? juce::String("ALL") : juce::String(n); };
+            s.valueFromTextFunction = [](const juce::String& t) { return t.trim().equalsIgnoreCase("all") ? 0.0 : (double) t.getIntValue(); };
+            break;
+        case Kind::Seed: // 0 = different every time
+            s.textFromValueFunction = [](double v) { const int n = juce::roundToInt(v); return n == 0 ? juce::String("RANDOM") : juce::String(n); };
+            s.valueFromTextFunction = [](const juce::String& t) { return t.trim().startsWithIgnoreCase("r") ? 0.0 : (double) t.getIntValue(); };
+            break;
     }
 
     s.updateText();
@@ -316,7 +352,8 @@ WT8Editor::WT8Editor(WT8AudioProcessor& p) : juce::AudioProcessorEditor(&p), pro
     row2_.push_back({"OUTPUT",     {&gain, &pan, &boost}, {}});
 
     // ---- sequencer strip ----
-    gateKnob_ = &addKnob("seq_gate", "GATE", Kind::Percent);
+    seqKnobs_ = {&addKnob("seq_gate", "GATE",  Kind::Percent),    &addKnob("seq_prob", "PROB", Kind::Percent),
+                 &addKnob("seq_loop", "LOOP",  Kind::LoopLength), &addKnob("seq_seed", "SEED", Kind::Seed)};
 
     for (auto* b : {&recBtn_, &restBtn_, &delBtn_, &clearBtn_, &playBtn_, &muteBtn_}) addAndMakeVisible(*b);
     recBtn_.setClickingTogglesState(true);
@@ -337,10 +374,27 @@ WT8Editor::WT8Editor(WT8AudioProcessor& p) : juce::AudioProcessorEditor(&p), pro
     };
     fillCombo(syncBox_, "seq_sync");
     fillCombo(divBox_, "seq_div");
+    fillCombo(dirBox_, "seq_dir");
     syncAtt_ = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(proc_.apvts, "seq_sync", syncBox_);
     divAtt_ = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(proc_.apvts, "seq_div", divBox_);
+    dirAtt_ = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(proc_.apvts, "seq_dir", dirBox_);
 
-    for (auto* l : {&syncLabel_, &divLabel_})
+    // lane switch (which per-step value the grid shows and edits) - editor state only, not saved
+    for (auto* b : {&pitchLaneBtn_, &probLaneBtn_})
+    {
+        b->setClickingTogglesState(true);
+        b->setRadioGroupId(1001);
+        addAndMakeVisible(*b);
+    }
+    pitchLaneBtn_.setToggleState(true, juce::dontSendNotification);
+    pitchLaneBtn_.onClick = [this] { if (pitchLaneBtn_.getToggleState()) grid_.setLane(StepGrid::Lane::Pitch); };
+    probLaneBtn_.onClick = [this] { if (probLaneBtn_.getToggleState()) grid_.setLane(StepGrid::Lane::Prob); };
+
+    pendBtn_.setClickingTogglesState(true);
+    addAndMakeVisible(pendBtn_);
+    pendAtt_ = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(proc_.apvts, "seq_pendrep", pendBtn_);
+
+    for (auto* l : {&syncLabel_, &divLabel_, &laneLabel_, &dirLabel_})
     {
         l->setJustificationType(juce::Justification::centredRight);
         l->setColour(juce::Label::textColourId, kDim);
@@ -350,12 +404,14 @@ WT8Editor::WT8Editor(WT8AudioProcessor& p) : juce::AudioProcessorEditor(&p), pro
     }
     syncLabel_.setText("SYNC", juce::dontSendNotification);
     divLabel_.setText("STEP", juce::dontSendNotification);
+    laneLabel_.setText("EDIT", juce::dontSendNotification);
+    dirLabel_.setText("DIRECTION", juce::dontSendNotification);
     addAndMakeVisible(grid_);
 
     setResizable(true, true);
-    setResizeLimits(630, 465, 1260, 930);
-    getConstrainer()->setFixedAspectRatio(840.0 / 620.0);
-    setSize(840, 620);
+    setResizeLimits(630, 518, 1260, 1035);
+    getConstrainer()->setFixedAspectRatio(840.0 / 690.0);
+    setSize(840, 690);
     grid_.refresh();
     startTimerHz(15);
 }
@@ -365,6 +421,7 @@ void WT8Editor::timerCallback()
     grid_.refresh();
     recBtn_.setToggleState(proc_.isSeqRecording(), juce::dontSendNotification);
     playBtn_.setEnabled(syncBox_.getSelectedItemIndex() == 0); // in "Logic" sync, Logic's transport is the play button
+    pendBtn_.setEnabled(dirBox_.getSelectedItemIndex() == 2);  // end-repeat only applies to the pendulum
 }
 
 WT8Editor::~WT8Editor()
@@ -461,25 +518,40 @@ void WT8Editor::resized()
     seqBounds_ = full.withTrimmedBottom(margin);
     auto inner = seqBounds_.withTrimmedTop(int(24 * scale)).reduced(int(8 * scale), int(4 * scale));
 
-    if (gateKnob_ != nullptr)
+    // right: 2 x 2 block of knobs (GATE PROB / LOOP SEED)
     {
-        auto gateCol = inner.removeFromRight(int(96 * scale));
-        inner.removeFromRight(int(6 * scale));
-        gateKnob_->name.setBounds(gateCol.removeFromTop(int(16 * scale)));
-        gateKnob_->name.getProperties().set("fontHeight", 11.0f * scale);
-        gateKnob_->slider.setTextBoxStyle(juce::Slider::TextBoxBelow, false, int(80 * scale), int(18 * scale));
-        gateKnob_->slider.setBounds(gateCol);
+        auto block = inner.removeFromRight(int(176 * scale));
+        inner.removeFromRight(int(8 * scale));
+        const int cw = block.getWidth() / 2, ch = block.getHeight() / 2;
+        for (size_t n = 0; n < seqKnobs_.size(); ++n)
+        {
+            auto cell = juce::Rectangle<int>(block.getX() + (int) (n % 2) * cw, block.getY() + (int) (n / 2) * ch, cw, ch);
+            auto* k = seqKnobs_[n];
+            k->name.setBounds(cell.removeFromTop(int(16 * scale)));
+            k->name.getProperties().set("fontHeight", 11.0f * scale);
+            k->slider.setTextBoxStyle(juce::Slider::TextBoxBelow, false, int(76 * scale), int(18 * scale));
+            k->slider.setBounds(cell);
+        }
     }
 
+    for (auto* l : {&syncLabel_, &divLabel_, &laneLabel_, &dirLabel_})
+        l->getProperties().set("fontHeight", 11.0f * scale);
+
+    // row A: pattern editing, transport, timing
     auto controls = inner.removeFromTop(int(30 * scale));
     auto put = [&](juce::Component& c, int w) { c.setBounds(controls.removeFromLeft(int(w * scale))); controls.removeFromLeft(int(6 * scale)); };
-    put(recBtn_, 52); put(restBtn_, 52); put(delBtn_, 46); put(clearBtn_, 56);
+    put(recBtn_, 48); put(restBtn_, 48); put(delBtn_, 42); put(clearBtn_, 52);
+    controls.removeFromLeft(int(10 * scale));
+    put(playBtn_, 52); put(muteBtn_, 52);
+    controls.removeFromLeft(int(10 * scale));
+    put(syncLabel_, 34); put(syncBox_, 66); put(divLabel_, 34); put(divBox_, 62);
+
+    // row B: which lane the grid edits, and how the pattern is played back
+    inner.removeFromTop(int(6 * scale));
+    controls = inner.removeFromTop(int(30 * scale));
+    put(laneLabel_, 34); put(pitchLaneBtn_, 54); put(probLaneBtn_, 54);
     controls.removeFromLeft(int(14 * scale));
-    put(playBtn_, 56); put(muteBtn_, 56);
-    controls.removeFromLeft(int(14 * scale));
-    syncLabel_.getProperties().set("fontHeight", 11.0f * scale);
-    divLabel_.getProperties().set("fontHeight", 11.0f * scale);
-    put(syncLabel_, 38); put(syncBox_, 70); put(divLabel_, 38); put(divBox_, 66);
+    put(dirLabel_, 66); put(dirBox_, 92); put(pendBtn_, 62);
 
     inner.removeFromTop(int(6 * scale));
     grid_.setBounds(inner);

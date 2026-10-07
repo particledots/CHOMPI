@@ -128,6 +128,148 @@ int main()
         r.deserialize("garbage,,xyz"); CHECK(r.length() == 3, "tolerant parse, length %d", r.length());
     }
 
+    // ================================ v0.4: loop length, direction, probability, seed ================================
+    auto onNotes = [](const std::vector<Ev>& e, size_t maxCount = 100000) {
+        std::vector<int> v; for (auto& x : e) if (x.on && v.size() < maxCount) v.push_back(x.note); return v;
+    };
+    auto sameEvents = [](const std::vector<Ev>& a, const std::vector<Ev>& b) {
+        if (a.size() != b.size()) return false;
+        for (size_t i = 0; i < a.size(); ++i) if (a[i].pos != b[i].pos || a[i].on != b[i].on || a[i].note != b[i].note) return false;
+        return true;
+    };
+    auto countOn = [](const std::vector<Ev>& e, int note = -1) { int n = 0; for (auto& x : e) if (x.on && (note < 0 || x.note == note)) ++n; return n; };
+    const long long step16 = 6000; // one 1/16 step at 120 bpm / 48 kHz
+
+    printf("T9 stepIndexFor: all four directions, loop of 1 and 2, negative step counters\n");
+    {
+        const int fw[] = {0, 1, 2, 3, 0, 1, 2, 3}, bw[] = {3, 2, 1, 0, 3, 2, 1, 0};
+        const int pn[] = {0, 1, 2, 3, 2, 1, 0, 1, 2, 3}, pr[] = {0, 1, 2, 3, 3, 2, 1, 0, 0, 1, 2, 3};
+        for (int k = 0; k < 8; ++k) CHECK(StepSequencer::stepIndexFor(k, 4, 0, false, 1) == fw[k] && StepSequencer::stepIndexFor(k, 4, 1, false, 1) == bw[k], "fwd/back k=%d", k);
+        for (int k = 0; k < 10; ++k) CHECK(StepSequencer::stepIndexFor(k, 4, 2, false, 1) == pn[k], "pendulum k=%d got %d want %d", k, StepSequencer::stepIndexFor(k, 4, 2, false, 1), pn[k]);
+        for (int k = 0; k < 12; ++k) CHECK(StepSequencer::stepIndexFor(k, 4, 2, true, 1) == pr[k], "pendulum+ends k=%d got %d want %d", k, StepSequencer::stepIndexFor(k, 4, 2, true, 1), pr[k]);
+        CHECK(StepSequencer::stepIndexFor(-1, 4, 0, false, 1) == 3 && StepSequencer::stepIndexFor(-1, 4, 1, false, 1) == 0, "negative k fwd/back");
+        for (long long k = -20; k < 20; ++k)
+            for (int d = 0; d < 4; ++d)
+            {
+                CHECK(StepSequencer::stepIndexFor(k, 1, d, d == 2, 5) == 0, "loop of 1 must always give step 0");
+                const int a = StepSequencer::stepIndexFor(k, 2, d, false, 5), b = StepSequencer::stepIndexFor(k, 7, d, true, 5);
+                CHECK(a >= 0 && a < 2 && b >= 0 && b < 7, "index out of range (k=%lld dir=%d)", k, d);
+            }
+    }
+
+    printf("T10 directions through the sequencer, pattern C D E F, 1/16\n");
+    {
+        const std::vector<int> fwd = {60,62,64,65,60,62,64,65,60,62,64,65}, bwd = {65,64,62,60,65,64,62,60,65,64,62,60},
+                               pen = {60,62,64,65,64,62,60,62,64,65,64,62}, penR = {60,62,64,65,65,64,62,60,60,62,64,65};
+        const int dirs[4] = {0, 1, 2, 2}; const bool rep[4] = {false, false, false, true}; const std::vector<int>* want[4] = {&fwd, &bwd, &pen, &penR};
+        for (int t = 0; t < 4; ++t)
+        {
+            StepSequencer s; fill(s, {60, 62, 64, 65}); SeqSettings d = st; d.direction = dirs[t]; d.pendRepeat = rep[t];
+            const auto got = onNotes(run(s, d, bpm, sr, 512, 12 * step16, false));
+            CHECK(got == *want[t], "direction %d repeat=%d played the wrong order (%zu notes)", dirs[t], (int) rep[t], got.size());
+        }
+    }
+
+    printf("T11 loop length: first N steps only, clamped to the pattern, 0 = all\n");
+    {
+        StepSequencer s; fill(s, {60, 61, 62, 63, 64, 65, 66, 67}); SeqSettings d = st;
+        d.loopLen = 3; auto g = onNotes(run(s, d, bpm, sr, 512, 7 * step16, false));
+        CHECK(g == std::vector<int>({60, 61, 62, 60, 61, 62, 60}), "loop 3 forward");
+        d.direction = 1; StepSequencer b; fill(b, {60, 61, 62, 63, 64, 65, 66, 67}); g = onNotes(run(b, d, bpm, sr, 512, 4 * step16, false));
+        CHECK(g == std::vector<int>({62, 61, 60, 62}), "loop 3 backward");
+        StepSequencer c; fill(c, {60, 62, 64, 65}); d = st; d.loopLen = 12; g = onNotes(run(c, d, bpm, sr, 512, 5 * step16, false));
+        CHECK(g == std::vector<int>({60, 62, 64, 65, 60}), "loop longer than the pattern uses the whole pattern");
+        StepSequencer z; fill(z, {60, 61, 62, 63, 64, 65, 66, 67}); d = st; d.loopLen = 0; g = onNotes(run(z, d, bpm, sr, 512, 9 * step16, false));
+        CHECK(g == std::vector<int>({60, 61, 62, 63, 64, 65, 66, 67, 60}), "loop 0 = whole pattern");
+        StepSequencer p; fill(p, {60, 61, 62, 63, 64, 65, 66, 67}); d = st; d.loopLen = 4; d.direction = 2; g = onNotes(run(p, d, bpm, sr, 512, 8 * step16, false));
+        CHECK(g == std::vector<int>({60, 61, 62, 63, 62, 61, 60, 61}), "pendulum inside a loop of 4");
+    }
+
+    printf("T12 probability: global, per step, rests, missed roll acts like a rest\n");
+    {
+        { StepSequencer s; fill(s, {60, 62, 64, 65}); SeqSettings d = st; d.prob = 0.f; d.seed = 3;
+          CHECK(run(s, d, bpm, sr, 512, 64 * step16, false).empty(), "global 0% must make no events at all"); }
+        { StepSequencer s; fill(s, {60, 62, 64, 65}); SeqSettings d = st; d.prob = 1.f; d.seed = 3;
+          CHECK(countOn(run(s, d, bpm, sr, 512, 64 * step16, false)) == 64, "100% x 100% must play every step"); }
+        { StepSequencer s; fill(s, {60, 62, 64, 65}); SeqSettings d = st; d.prob = 0.5f; d.seed = 3;
+          const int n = countOn(run(s, d, bpm, sr, 4096, 2000 * step16, false));
+          CHECK(n > 900 && n < 1100, "global 50%% over 2000 steps played %d (want about 1000)", n); }
+        { StepSequencer s; fill(s, {60, 62, 64, 65}); s.setProb(1, 0); s.setProb(2, 50); SeqSettings d = st; d.seed = 5;
+          const auto e = run(s, d, bpm, sr, 512, 800 * step16, false);
+          CHECK(countOn(e, 62) == 0, "0%% step must never play");
+          CHECK(countOn(e, 60) == 200 && countOn(e, 65) == 200, "100%% steps must always play (%d, %d)", countOn(e, 60), countOn(e, 65));
+          const int m = countOn(e, 64); CHECK(m > 70 && m < 130, "50%% step played %d of 200", m); }
+        { StepSequencer s; fill(s, {60, 62, 64, 65}); s.setProb(0, 50); SeqSettings d = st; d.prob = 0.5f; d.seed = 5; // 50% x 50% = 25%
+          const int n = countOn(run(s, d, bpm, sr, 4096, 4000 * step16, false), 60);
+          CHECK(n > 190 && n < 310, "step 50%% x global 50%% played %d of 1000 (want about 250)", n); }
+        { StepSequencer s; fill(s, {60, 62}); s.setProb(1, 0); SeqSettings d = st; d.gate = 1.f; // missed step: previous note still ends on time
+          const auto e = run(s, d, bpm, sr, 512, 6 * step16, false);
+          bool ok = !e.empty(); int ons = 0;
+          for (size_t i = 0; i < e.size(); ++i) { if (e[i].on) { ++ons; ok = ok && e[i].note == 60; } else ok = ok && i > 0 && e[i - 1].on && near(e[i].pos, e[i - 1].pos + step16); }
+          CHECK(ok && ons == 3, "missed step should just end the previous note (ons=%d)", ons); }
+        { StepSequencer s; fill(s, {60, -1, 62}); SeqSettings d = st; d.seed = 2;
+          CHECK(countOn(run(s, d, bpm, sr, 512, 30 * step16, false)) == 20, "rests stay rests"); }
+    }
+
+    printf("T13 seed: fixed = repeatable at any block size, off = new choices each start\n");
+    {
+        SeqSettings d = st; d.prob = 0.5f; d.direction = 3; d.seed = 11; d.gate = 0.5f;
+        auto mk = [&](StepSequencer& q) { fill(q, {60, 62, 64, 65, 67, 69}); q.setProb(1, 60); };
+        StepSequencer a, b, c; mk(a); mk(b); mk(c);
+        const auto ea = run(a, d, bpm, sr, 64, 400 * step16, false), eb = run(b, d, bpm, sr, 997, 400 * step16, false), ec = run(c, d, bpm, sr, 4096, 400 * step16, false);
+        CHECK(!ea.empty() && sameEvents(ea, eb) && sameEvents(ea, ec), "fixed seed gave different events at different block sizes (%zu %zu %zu)", ea.size(), eb.size(), ec.size());
+        StepSequencer o; mk(o); SeqSettings d2 = d; d2.seed = 12;
+        CHECK(!sameEvents(ea, run(o, d2, bpm, sr, 512, 400 * step16, false)), "seed 11 and seed 12 should differ");
+        StepSequencer p, q; mk(p); mk(q); SeqSettings d0 = d; d0.seed = 0;
+        const auto e1 = run(p, d0, bpm, sr, 512, 400 * step16, false);
+        CHECK(!sameEvents(e1, run(q, d0, bpm, sr, 512, 400 * step16, false)), "seed off: two fresh sequencers should differ");
+        p.resetTransport();
+        CHECK(!sameEvents(e1, run(p, d0, bpm, sr, 512, 400 * step16, false)), "seed off: stopping and starting again should re-roll");
+        // Logic sync: a cycle jump re-rolls with seed off, repeats exactly with a fixed seed. 8 quarters = 32 steps, jump back at t = 192000
+        const long long pass = 192000;
+        for (int fixedSeed = 0; fixedSeed < 2; ++fixedSeed)
+        {
+            StepSequencer l; fill(l, {60, 62, 64, 65}); SeqSettings f = st; f.prob = 0.5f; f.seed = fixedSeed ? 4 : 0;
+            const auto e = run(l, f, bpm, sr, 512, 2 * pass, true, 0.0, {{pass, 0.0}});
+            std::vector<Ev> p1, p2; for (auto& x : e) (x.pos < pass ? p1 : p2).push_back({x.pos < pass ? x.pos : x.pos - pass, x.on, x.note});
+            const bool same = p1.size() == p2.size() && sameEvents(p1, p2);
+            CHECK(fixedSeed ? same : !same, "Logic cycle pass with seed %s: passes %s", fixedSeed ? "fixed" : "off", same ? "identical" : "differ");
+        }
+    }
+
+    printf("T14 Logic sync is bar-locked: a pendulum / random / probability pattern depends only on the host position\n");
+    {
+        SeqSettings d = st; d.followHost = true; d.play = false; d.direction = 2; d.pendRepeat = true; d.prob = 0.6f; d.seed = 9; d.loopLen = 5;
+        StepSequencer a, b; fill(a, {60, 62, 64, 65, 67, 69, 71}); fill(b, {60, 62, 64, 65, 67, 69, 71});
+        const auto full = run(a, d, bpm, sr, 512, 16 * 24000, true, 0.0);
+        const auto late = run(b, d, bpm, sr, 700, 12 * 24000, true, 4.0); // starts 4 quarters (96000 samples) in
+        std::vector<Ev> ref; for (auto& x : full) if (x.pos >= 96000) ref.push_back({x.pos - 96000, x.on, x.note});
+        CHECK(!ref.empty() && sameEvents(ref, late), "starting at bar 2 should reproduce the same events (%zu vs %zu)", ref.size(), late.size());
+        d.direction = 3; StepSequencer c, e2; fill(c, {60, 62, 64, 65, 67, 69, 71}); fill(e2, {60, 62, 64, 65, 67, 69, 71});
+        const auto fullR = run(c, d, bpm, sr, 512, 16 * 24000, true, 0.0), lateR = run(e2, d, bpm, sr, 333, 12 * 24000, true, 4.0);
+        std::vector<Ev> refR; for (auto& x : fullR) if (x.pos >= 96000) refR.push_back({x.pos - 96000, x.on, x.note});
+        CHECK(!refR.empty() && sameEvents(refR, lateR), "random direction must also depend only on the host position");
+    }
+
+    printf("T15 per-step probability: save format, old (v0.3) patterns, clamping, editing\n");
+    {
+        StepSequencer s; s.recordNote(60, 100); s.setProb(0, 75); s.addRest(); s.recordNote(67, 80); s.setProb(2, 0);
+        CHECK(s.serialize() == "60:100:75,r,67:80:0", "serialized '%s'", s.serialize().c_str());
+        StepSequencer r; r.deserialize("60:100:75,r:50,67:80"); CHECK(r.serialize() == "60:100:75,r:50,67:80", "round trip '%s'", r.serialize().c_str());
+        r.setProb(1, 20); CHECK(r.serialize() == "60:100:75,r:50,67:80", "setProb on a rest must be ignored, got '%s'", r.serialize().c_str());
+        StepSequencer old; old.deserialize("60:100,r,67:80,64");
+        SeqStep stp[32]; int len, idx; old.snapshot(stp, len, idx);
+        CHECK(len == 4 && stp[0].prob == 100 && stp[1].prob == 100 && stp[2].prob == 100 && stp[3].prob == 100, "v0.3 pattern should load at 100%%");
+        CHECK(old.serialize() == "60:100,r,67:80,64:100", "v0.3 pattern re-saves unchanged apart from filling in a velocity, got '%s'", old.serialize().c_str());
+        StepSequencer cl; cl.deserialize("60:100:250,61:100:-5"); cl.snapshot(stp, len, idx);
+        CHECK(stp[0].prob == 100 && stp[1].prob == 0, "probabilities clamp to 0..100 (%d, %d)", stp[0].prob, stp[1].prob);
+        StepSequencer t; t.recordNote(60, 100); t.setProb(0, 40); t.toggleRest(0); t.toggleRest(0); t.snapshot(stp, len, idx);
+        CHECK(!stp[0].rest && stp[0].prob == 40, "toggling rest and back keeps the probability");
+        t.setProb(0, 500); t.snapshot(stp, len, idx); CHECK(stp[0].prob == 100, "setProb clamps high");
+        t.setProb(0, -9); t.snapshot(stp, len, idx); CHECK(stp[0].prob == 0, "setProb clamps low");
+        t.setProb(5, 10); t.deleteLast(); t.recordNote(61, 90); t.snapshot(stp, len, idx); CHECK(stp[0].prob == 100, "a fresh step starts at 100%%");
+    }
+
     printf(failures ? "FAIL (%d)\n" : "PASS\n", failures);
     return failures ? 1 : 0;
 }

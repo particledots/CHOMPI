@@ -10,23 +10,25 @@ using juce::NormalisableRange;
 using juce::AudioParameterFloat;
 using juce::AudioParameterInt;
 
-std::unique_ptr<AudioParameterFloat> f(const char* id, const char* name, float lo, float hi, float def)
+// `ver` is the AU parameter version hint. Logic identifies AU parameters by position, and JUCE orders them by
+// version hint first, so parameters added in a later plugin version must use a higher number than every earlier one.
+std::unique_ptr<AudioParameterFloat> f(const char* id, const char* name, float lo, float hi, float def, int ver = 1)
 {
-    return std::make_unique<AudioParameterFloat>(juce::ParameterID{id, 1}, name, NormalisableRange<float>(lo, hi), def);
+    return std::make_unique<AudioParameterFloat>(juce::ParameterID{id, ver}, name, NormalisableRange<float>(lo, hi), def);
 }
-std::unique_ptr<juce::AudioParameterBool> b(const char* id, const char* name, bool def)
+std::unique_ptr<juce::AudioParameterBool> b(const char* id, const char* name, bool def, int ver = 1)
 {
-    return std::make_unique<juce::AudioParameterBool>(juce::ParameterID{id, 1}, name, def);
-}
-
-std::unique_ptr<juce::AudioParameterChoice> c(const char* id, const char* name, const juce::StringArray& choices, int def)
-{
-    return std::make_unique<juce::AudioParameterChoice>(juce::ParameterID{id, 1}, name, choices, def);
+    return std::make_unique<juce::AudioParameterBool>(juce::ParameterID{id, ver}, name, def);
 }
 
-std::unique_ptr<AudioParameterInt> i(const char* id, const char* name, int lo, int hi, int def)
+std::unique_ptr<juce::AudioParameterChoice> c(const char* id, const char* name, const juce::StringArray& choices, int def, int ver = 1)
 {
-    return std::make_unique<AudioParameterInt>(juce::ParameterID{id, 1}, name, lo, hi, def);
+    return std::make_unique<juce::AudioParameterChoice>(juce::ParameterID{id, ver}, name, choices, def);
+}
+
+std::unique_ptr<AudioParameterInt> i(const char* id, const char* name, int lo, int hi, int def, int ver = 1)
+{
+    return std::make_unique<AudioParameterInt>(juce::ParameterID{id, ver}, name, lo, hi, def);
 }
 } // namespace
 
@@ -61,6 +63,15 @@ juce::AudioProcessorValueTreeState::ParameterLayout WT8AudioProcessor::createLay
     l.add(c("seq_div", "Seq Step Length", divisions, 2));
     l.add(f("seq_gate", "Seq Gate", 0.05f, 1.f, 0.5f));
     l.add(b("seq_mute", "Seq Mute", false));
+
+    // v0.4 sequencer playback options. Version hint 2: added after v0.3 shipped (see the note on `ver` above).
+    juce::StringArray directions;
+    for (int d = 0; d < StepSequencer::kNumDirections; ++d) directions.add(StepSequencer::directionName(d));
+    l.add(i("seq_loop", "Seq Loop Length", 0, StepSequencer::kMaxSteps, 0, 2)); // 0 = whole pattern
+    l.add(c("seq_dir", "Seq Direction", directions, 0, 2));
+    l.add(b("seq_pendrep", "Seq Pendulum Repeat Ends", false, 2));
+    l.add(f("seq_prob", "Seq Probability", 0.f, 1.f, 1.f, 2));
+    l.add(i("seq_seed", "Seq Seed", 0, 99, 0, 2)); // 0 = random every time
     return l;
 }
 
@@ -154,6 +165,11 @@ void WT8AudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
     ss.gate       = *apvts.getRawParameterValue("seq_gate");
     ss.mute       = *apvts.getRawParameterValue("seq_mute") > 0.5f;
     ss.recording  = seqRecording_.load();
+    ss.loopLen    = (int) *apvts.getRawParameterValue("seq_loop");
+    ss.direction  = (int) *apvts.getRawParameterValue("seq_dir");
+    ss.pendRepeat = *apvts.getRawParameterValue("seq_pendrep") > 0.5f;
+    ss.prob       = *apvts.getRawParameterValue("seq_prob");
+    ss.seed       = (int) *apvts.getRawParameterValue("seq_seed");
     const int numSeq = seq_.process(sampleRate_, numSamples, host, ss, seqEvents_, 64);
 
     // Render in segments so every note starts at its sample-accurate position (MIDI + sequencer merged).
@@ -214,6 +230,8 @@ void WT8AudioProcessor::setStateInformation(const void* data, int sizeInBytes)
         if (xml->hasTagName(apvts.state.getType()))
         {
             apvts.replaceState(juce::ValueTree::fromXml(*xml));
+            // (A parameter missing from an older saved state comes back at its default: JUCE's APVTS does that itself,
+            // and plugin_test checks it, so a project saved by v0.3 plays as before.)
             seq_.deserialize(apvts.state.getProperty("sequence").toString().toStdString());
             seq_.resetTransport();
             // Never start playing on its own just because a project was opened

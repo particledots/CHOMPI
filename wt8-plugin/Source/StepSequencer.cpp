@@ -1,8 +1,10 @@
 #include "StepSequencer.h"
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <random>
 
 struct StepSequencer::Lock
 {
@@ -10,6 +12,70 @@ struct StepSequencer::Lock
     ~Lock() { f_.clear(std::memory_order_release); }
     std::atomic_flag& f_;
 };
+
+namespace
+{
+// splitmix64 finaliser: a cheap, well-mixed 64-bit hash
+uint64_t mix64(uint64_t x)
+{
+    x += 0x9e3779b97f4a7c15ULL;
+    x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
+    return x ^ (x >> 31);
+}
+
+// Uniform [0, 1) from (key, stream, step counter). Stateless, so the result never depends on block size.
+double unitRandom(uint64_t key, uint64_t stream, long long k)
+{
+    const uint64_t h = mix64(mix64(key ^ (stream * 0xd1342543de82ef95ULL)) ^ (uint64_t) k);
+    return (double) (h >> 11) * (1.0 / 9007199254740992.0); // 53 bits
+}
+
+long long posMod(long long a, long long m) { return ((a % m) + m) % m; }
+} // namespace
+
+StepSequencer::StepSequencer()
+{
+    uint64_t seed = (uint64_t) std::chrono::steady_clock::now().time_since_epoch().count() ^ (uint64_t) (uintptr_t) this;
+    try { std::random_device rd; seed ^= ((uint64_t) rd() << 32) ^ (uint64_t) rd(); } catch (...) {}
+    rngState_ = mix64(seed) | 1ULL;
+    runKey_ = mix64(rngState_ + 1);
+}
+
+uint64_t StepSequencer::nextRandom()
+{
+    rngState_ ^= rngState_ << 13; // xorshift64
+    rngState_ ^= rngState_ >> 7;
+    rngState_ ^= rngState_ << 17;
+    return mix64(rngState_);
+}
+
+const char* StepSequencer::directionName(int d)
+{
+    static const char* n[kNumDirections] = {"Forward", "Backward", "Pendulum", "Random"};
+    return n[std::max(0, std::min(kNumDirections - 1, d))];
+}
+
+int StepSequencer::stepIndexFor(long long k, int L, int direction, bool pendRepeat, uint64_t key)
+{
+    if (L <= 1) return 0;
+    switch (direction)
+    {
+        case 1: // backward
+            return L - 1 - (int) posMod(k, L);
+        case 2: // pendulum: 1-2-3-2-1-2-3...  or, with repeated ends, 1-2-3-3-2-1-1-2-3...
+        {
+            const long long period = pendRepeat ? 2LL * L : 2LL * L - 2;
+            const long long n = posMod(k, period);
+            if (n < L) return (int) n;
+            return (int) (pendRepeat ? 2LL * L - 1 - n : 2LL * L - 2 - n);
+        }
+        case 3: // random (a step can come up twice in a row)
+            return std::min(L - 1, (int) (unitRandom(key, 1, k) * L));
+        default: // forward
+            return (int) posMod(k, L);
+    }
+}
 
 double StepSequencer::divisionQuarterNotes(int d)
 {
@@ -66,6 +132,13 @@ void StepSequencer::setNote(int index, int note)
     lastNote_ = steps_[index].note;
 }
 
+void StepSequencer::setProb(int index, int percent)
+{
+    Lock l(lock_);
+    if (index < 0 || index >= len_ || steps_[index].rest) return;
+    steps_[index].prob = (uint8_t) std::max(0, std::min(100, percent));
+}
+
 void StepSequencer::toggleRest(int index)
 {
     Lock l(lock_);
@@ -90,9 +163,16 @@ std::string StepSequencer::serialize() const
     std::string out;
     for (int i = 0; i < len_; ++i)
     {
+        // v0.3 format is "note:vel" or "r". v0.4 appends ":prob" (or "r:prob") only when the probability is not 100,
+        // so a pattern that does not use probability is saved exactly as before.
         if (i) out += ',';
-        if (steps_[i].rest) out += 'r';
-        else out += std::to_string((int) steps_[i].note) + ":" + std::to_string((int) steps_[i].vel);
+        const bool hasProb = steps_[i].prob != 100;
+        if (steps_[i].rest) out += hasProb ? "r:" + std::to_string((int) steps_[i].prob) : std::string("r");
+        else
+        {
+            out += std::to_string((int) steps_[i].note) + ":" + std::to_string((int) steps_[i].vel);
+            if (hasProb) out += ":" + std::to_string((int) steps_[i].prob);
+        }
     }
     return out;
 }
@@ -111,13 +191,20 @@ void StepSequencer::deserialize(const std::string& text)
         SeqStep s;
         if (!tok.empty() && tok[0] != 'r')
         {
-            int note = 60, vel = 100;
-            if (std::sscanf(tok.c_str(), "%d:%d", &note, &vel) >= 1)
+            int note = 60, vel = 100, prob = 100;
+            const int got = std::sscanf(tok.c_str(), "%d:%d:%d", &note, &vel, &prob);
+            if (got >= 1)
             {
                 s.note = (uint8_t) std::max(0, std::min(127, note));
                 s.vel = (uint8_t) std::max(1, std::min(127, vel));
+                s.prob = (uint8_t) std::max(0, std::min(100, prob)); // stays 100 when the token has no third field
                 s.rest = false;
             }
+        }
+        else if (!tok.empty())
+        {
+            int prob = 100;
+            if (std::sscanf(tok.c_str(), "r:%d", &prob) == 1) s.prob = (uint8_t) std::max(0, std::min(100, prob));
         }
         steps_[len_++] = s;
         pos = end + 1;
@@ -176,11 +263,16 @@ int StepSequencer::process(double sr, int numSamples, const SeqHostInfo& h, cons
 
     const double bpm = h.bpm > 0.0 ? h.bpm : 120.0;
     const double pps = bpm / 60.0 / sr; // quarter notes per sample
+    if (!wasRunning_) runKey_ = nextRandom(); // SEED off: every start gets fresh random choices
     double ppq0;
     if (s.followHost)
     {
         ppq0 = h.ppq;
-        if (wasRunning_ && std::fabs(ppq0 - expectedPpq_) > 0.02) releaseHeld(0); // relocate / loop jump
+        if (wasRunning_ && std::fabs(ppq0 - expectedPpq_) > 0.02)
+        {
+            releaseHeld(0); // relocate / loop jump
+            runKey_ = nextRandom(); // ...and so does every pass of a Logic cycle
+        }
     }
     else
     {
@@ -191,6 +283,11 @@ int StepSequencer::process(double sr, int numSamples, const SeqHostInfo& h, cons
     const double stepLen = divisionQuarterNotes(s.division);
     const double eps = 1e-7;
     auto toOffset = [&](double p) { return (int) std::lround((p - ppq0) / pps); };
+
+    // v0.4: the loop covers the first `loopLen` steps (0 = all); direction and probability use the same random key
+    const int loop = (s.loopLen <= 0) ? len_ : std::max(1, std::min(s.loopLen, len_));
+    const uint64_t key = s.seed > 0 ? mix64((uint64_t) s.seed) : runKey_;
+    const double globalProb = std::max(0.0, std::min(1.0, (double) s.prob));
 
     long long k = (long long) std::ceil(ppq0 / stepLen - eps); // first step boundary at or after the block start
     for (;;)
@@ -210,10 +307,16 @@ int StepSequencer::process(double sr, int numSamples, const SeqHostInfo& h, cons
 
         const int off = toOffset(b);
         if (held_) { emit(off, false, heldNote_, 0); held_ = false; gateOffPpq_ = -1.0; }
-        const int idx = (int) (((k % len_) + len_) % len_);
+        const int idx = stepIndexFor(k, loop, s.direction, s.pendRepeat, key);
         displayIdx_.store(idx, std::memory_order_relaxed);
         const SeqStep& st = steps_[idx];
-        if (!st.rest && !s.mute)
+        bool fire = !st.rest && !s.mute;
+        if (fire)
+        {
+            const double p = (st.prob / 100.0) * globalProb;
+            if (p < 1.0 - 1e-9) fire = unitRandom(key, 2, k) < p; // a missed roll behaves like a rest
+        }
+        if (fire)
         {
             emit(off, true, st.note, st.vel);
             held_ = true;
