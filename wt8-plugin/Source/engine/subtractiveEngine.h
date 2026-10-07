@@ -17,6 +17,11 @@
 #define NUM_VOICES 8
 
 static constexpr size_t kMaxDelayTime = 48128 * 2; // stereo, > 1 seconds at 48kHz
+// ipmohc: the firmware counts delay length in samples at a fixed 48 kHz. These scale it with the host
+// rate so the delay time in seconds stays the same, and size the delay memory to match.
+static inline size_t delayMemSize(float sample_rate) {
+    return (size_t)std::ceil((double)kMaxDelayTime * (double)sample_rate / 48000.0);
+}
 
 using namespace daisy;
 using namespace daisysp;
@@ -174,8 +179,9 @@ class myEngine {
 
         globalFrequency = .5f;
 
-        del_.Init(del, kMaxDelayTime);
-        del_.SetDelay(kMaxDelayTime * .5f);
+        delay_scale = sample_rate / 48000.f;
+        del_.Init(del, delayMemSize(sample_rate));
+        del_.SetDelay(kMaxDelayTime * .5f * delay_scale);
         setDelayTime(.5f);
         delay_time = delay_time_target;
         reverb_time = reverb_time_target;
@@ -559,7 +565,8 @@ class myEngine {
     }
 
     void setDelayTime(float amount) {
-        delay_time_target = .99f * powf(amount, 3.f) * kMaxDelayTime + 450;
+        const float scale = delay_scale > 0.f ? delay_scale : 1.f;
+        delay_time_target = (.99f * powf(amount, 3.f) * kMaxDelayTime + 450) * scale;
 
         reverb_time_target = fclamp(amount, .05f, .97f);
     }
@@ -743,6 +750,7 @@ class myEngine {
     float reverb_amount, reverb_amount_target;
     float reverb_time, reverb_time_target;
     float delay_time, delay_time_target;
+    float delay_scale = 0.f; // host sample rate / 48000, set in Init()
     daisysp::DcBlock dcblock_fx_l_, dcblock_fx_r_;
     float gain, gain_target;
     float pan, pan_target;

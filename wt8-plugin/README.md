@@ -51,7 +51,8 @@ Instrument slot -> AU Instruments -> particledots -> ipmohc. If it doesn't show 
 | Output Boost (dB) | -12..36 / +20 | **plugin only.** The engine's raw output is very quiet (it feeds analog hardware gain); this makes up the difference. 8 notes at once at +20 dB can approach full scale. |
 
 ## Known limitations / things to verify
-- **Pitch.** Engine pitch follows the firmware's own formula (MIDI note 60 -> transpose index 0). Measured note 60 as ~260 Hz in a zero-crossing test, roughly where you'd expect C4 but it has not been checked against a tuner, and it depends on how many cycles each wavetable stores. Check by ear against another instrument; the Pitch/Octave params can correct it, and a fixed offset can be added in `WT8Engine::noteOn`.
+- **Pitch.** The firmware plays MIDI note 60 at 130.81 Hz (an octave below most synths). ipmohc adds +12 semitones in `WT8Engine::noteOn` so MIDI 60 = 261.63 Hz; `tests/rate_test.cpp` checks this to within 3 cents at 44.1, 48 and 96 kHz. Octave +1 / -1 still shifts by an octave from there.
+- **Sample rate.** The firmware counts delay length in samples at 48 kHz. The engine now scales the delay length and memory by host rate / 48000 (one small change in `Source/engine/subtractiveEngine.h`), so delay time in seconds is the same at every rate. Reverb size and LFO speeds are not yet verified across rates.
 - **Sample rate.** The firmware runs at 48 kHz; some constants (parameter smoothing, the 960-sample wavetable crossfade, the delay buffer length) were tuned for that, so at 44.1 / 96 kHz timing shifts slightly. Not tested at 96 kHz.
 - **Block size.** The engine processes 24-sample blocks as on hardware; key requests are applied between blocks (sub-millisecond).
 - Velocity -> level follows the firmware (vel+1)/127.

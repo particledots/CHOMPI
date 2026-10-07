@@ -15,6 +15,7 @@ namespace
 {
 constexpr int kBlock = 24; // the firmware's audio block size; key requests are drained per block
 
+constexpr int kPitchOffsetSemis = 12;
 constexpr size_t kTableFloats = (size_t)WT8Engine::kCyclesPerTable * MAX_SAMPLES_PER_CYCLE;
 
 // The firmware relies on statics being zero-initialised (SDRAM / BSS). Mirror that for heap objects.
@@ -40,7 +41,7 @@ struct WT8Engine::Impl
         : engine(makeZeroed<myEngine>()),
           reverb(makeZeroed<daisysp::Reverb>()),
           loader(makeZeroed<wavetableLoader>()),
-          delayMem((size_t)kMaxDelayTime, chompi::InterpolatedDelayLine::AudioSample{0, 0}),
+          delayMem(delayMemSize((float)sr), chompi::InterpolatedDelayLine::AudioSample{0, 0}),
           tables((size_t)256 * MAX_SAMPLES_PER_CYCLE, 0.f), // 256 cycles max, same as firmware
           sampleRate((float)sr)
     {
@@ -164,7 +165,9 @@ void WT8Engine::noteOn(int midiNote, int midiVelocity)
 {
     impl_->ensureInit();
     // The firmware maps MIDI note -> transpose_nn = note - 60 and uses vel+1 on a 1..128 scale.
-    impl_->push(KeyRequest(KeyRequest::Type::START, (float)(midiNote - 60), midiNote,
+    // That puts MIDI 60 at 130.81 Hz (an octave below other synths); +12 makes MIDI 60 = 261.63 Hz.
+    // Note-off matches on the MIDI key, so it needs no offset.
+    impl_->push(KeyRequest(KeyRequest::Type::START, (float)(midiNote - 60 + kPitchOffsetSemis), midiNote,
                            (float)(midiVelocity + 1), KeyRequest::Source::USER));
 }
 

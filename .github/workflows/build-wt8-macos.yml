@@ -18,6 +18,7 @@ jobs:
         run: |
           ./build/render_test wt8-plugin/wavetables build/render_test_out.wav
           ./build/plugin_test
+          ./build/rate_test wt8-plugin/wavetables
       - name: Verify universal binary (arm64 + x86_64)
         run: |
           fail=0; n=0

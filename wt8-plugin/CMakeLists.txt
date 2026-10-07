@@ -26,7 +26,7 @@ target_compile_options(daisysp PRIVATE -w)
 set_target_properties(daisysp PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # ---------------------------------------------------------------------------
-# WT8 engine: unmodified CHOMPI WAVE headers + a few shims + our small wrapper
+# WT8 engine: CHOMPI WAVE headers (one small sample-rate change to the delay) + a few shims + our small wrapper
 # ---------------------------------------------------------------------------
 add_library(wt8_engine STATIC Source/WT8Engine.cpp)
 # shim must come first so our stubs replace the hardware-bound headers
@@ -38,6 +38,9 @@ set_target_properties(wt8_engine PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 add_executable(render_test tests/render_test.cpp)
 target_link_libraries(render_test PRIVATE wt8_engine)
+
+add_executable(rate_test tests/rate_test.cpp)
+target_link_libraries(rate_test PRIVATE wt8_engine)
 
 if(WT8_ENGINE_ONLY)
   return()
