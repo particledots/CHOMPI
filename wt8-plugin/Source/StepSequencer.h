@@ -47,6 +47,12 @@ struct SeqSettings
     bool  pendRepeat = false; // pendulum: the two end steps play twice (1-2-3-3-2-1) instead of once (1-2-3-2-1)
     float prob = 1.0f;        // global probability 0..1, multiplied with each step's own probability
     int   seed = 0;           // 0 = different every time playback starts; 1..n = the same random choices every time
+
+    // v0.5 pitch handling, applied to each note as it is played (the recorded pattern is never changed).
+    // The defaults (no scale, no transpose) reproduce v0.4 behaviour exactly.
+    int   scale = -1;         // -1 = off; 0..kNumScales-1 = snap played notes to this scale (see scaleName())
+    int   root = 0;           // scale root as a pitch class, 0 = C .. 11 = B
+    int   transpose = 0;      // semitones added to every note BEFORE it is snapped to the scale
 };
 
 class StepSequencer
@@ -58,6 +64,18 @@ class StepSequencer
     static double divisionQuarterNotes(int division); // 0..3 = 1/4 1/8 1/16 1/32, 4..7 = triplets
     static const char* divisionName(int division);
     static const char* directionName(int direction);
+
+    // ---- scales (v0.5). Same 28 scales, in the same order and with the same names, as the Scripter scripts ----
+    static constexpr int kNumScales = 28;
+    static const char* scaleName(int scale);
+    /** True when MIDI note `note` is a tone of `scale` built on pitch class `root`. A scale outside 0..kNumScales-1 counts as "everything". */
+    static bool inScale(int note, int root, int scale);
+    /** Nearest scale tone to `note` (a note halfway between two tones snaps DOWN). Scale off / out of range returns `note` unchanged. */
+    static int quantizeNote(int note, int root, int scale);
+    /** Next scale tone strictly above (dir > 0) or below (dir < 0) `note`, for editing in scale steps. Stays put at the ends of the keyboard. */
+    static int scaleStep(int note, int dir, int root, int scale);
+    /** What actually sounds for a stored note: transposed, kept inside 0..127, then snapped to the scale. */
+    static int playedNote(int note, int transpose, int root, int scale);
 
     /** Which pattern step plays at absolute step counter `k` (0 = bar start / first step). Pure function: the same
         inputs always give the same step, so playback does not depend on how the host chops audio into blocks. */
@@ -80,6 +98,8 @@ class StepSequencer
     // ---- audio thread ----
     void recordNote(int note, int velocity);
     void resetTransport();
+    /** True while the last processed block was running the pattern (PLAY on / host playing, pattern not empty, not recording). */
+    bool isRunning() const { return running_.load(std::memory_order_relaxed); }
     /** Produces the note events for the next `numSamples`. Returns how many were written to `out`. */
     int process(double sampleRate, int numSamples, const SeqHostInfo&, const SeqSettings&, SeqEvent* out, int maxOut);
 
@@ -99,6 +119,7 @@ class StepSequencer
     int    heldNote_ = 60;
     double gateOffPpq_ = -1.0;
     std::atomic<int> displayIdx_{-1};
+    std::atomic<bool> running_{false};
 
     // random choices (probability, random direction) are a pure function of (key, step counter); with SEED off the
     // key is redrawn whenever playback starts or the host jumps, so every start sounds different

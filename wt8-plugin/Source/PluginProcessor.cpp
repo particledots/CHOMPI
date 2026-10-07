@@ -72,6 +72,15 @@ juce::AudioProcessorValueTreeState::ParameterLayout WT8AudioProcessor::createLay
     l.add(b("seq_pendrep", "Seq Pendulum Repeat Ends", false, 2));
     l.add(f("seq_prob", "Seq Probability", 0.f, 1.f, 1.f, 2));
     l.add(i("seq_seed", "Seq Seed", 0, 99, 0, 2)); // 0 = random every time
+
+    // v0.5 pitch handling. Version hint 3: added after v0.4 shipped, so Logic keeps the order of everything older.
+    juce::StringArray scales, roots;
+    scales.add("Off");
+    for (int s = 0; s < StepSequencer::kNumScales; ++s) scales.add(StepSequencer::scaleName(s));
+    for (const char* r : {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"}) roots.add(r);
+    l.add(c("seq_scale", "Seq Scale", scales, 0, 3));      // item 0 = Off, item n = scale n-1 of the Scripter list
+    l.add(c("seq_root", "Seq Scale Root", roots, 0, 3));
+    l.add(b("seq_xpose", "Seq MIDI Transpose", false, 3)); // keys played in set the pattern transpose (C3 = none)
     return l;
 }
 
@@ -170,6 +179,10 @@ void WT8AudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
     ss.pendRepeat = *apvts.getRawParameterValue("seq_pendrep") > 0.5f;
     ss.prob       = *apvts.getRawParameterValue("seq_prob");
     ss.seed       = (int) *apvts.getRawParameterValue("seq_seed");
+    const bool xposeOn = *apvts.getRawParameterValue("seq_xpose") > 0.5f;
+    ss.scale      = (int) *apvts.getRawParameterValue("seq_scale") - 1; // choice 0 = Off -> -1
+    ss.root       = (int) *apvts.getRawParameterValue("seq_root");
+    ss.transpose  = xposeOn ? seqTranspose_.load() : 0;                 // switched off = the pattern plays as recorded
     const int numSeq = seq_.process(sampleRate_, numSamples, host, ss, seqEvents_, 64);
 
     // Render in segments so every note starts at its sample-accurate position (MIDI + sequencer merged).
@@ -199,8 +212,19 @@ void WT8AudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
             if (m.isNoteOn())
             {
                 const int vel = juce::jmax(1, (int) m.getVelocity());
-                engine_->noteOn(m.getNoteNumber(), vel);
-                if (seqRecording_.load()) seq_.recordNote(m.getNoteNumber(), vel); // step-record: each played note adds a step
+                const bool recording = seqRecording_.load();
+                if (xposeOn && !recording)
+                {
+                    // MIDI XPOSE: the key sets the pattern transpose (C3 = 0). Recording takes priority: while REC is armed
+                    // keys record steps as usual. The key only sounds when the pattern is not running.
+                    seqTranspose_.store(juce::jlimit(-127, 127, m.getNoteNumber() - 60));
+                    if (!seq_.isRunning()) engine_->noteOn(m.getNoteNumber(), vel);
+                }
+                else
+                {
+                    engine_->noteOn(m.getNoteNumber(), vel);
+                    if (recording) seq_.recordNote(m.getNoteNumber(), vel); // step-record: each played note adds a step
+                }
             }
             else if (m.isNoteOff())
                 engine_->noteOff(m.getNoteNumber());
@@ -220,6 +244,7 @@ juce::AudioProcessorEditor* WT8AudioProcessor::createEditor()
 void WT8AudioProcessor::getStateInformation(juce::MemoryBlock& destData)
 {
     apvts.state.setProperty("sequence", juce::String(seq_.serialize()), nullptr);
+    apvts.state.setProperty("transpose", seqTranspose_.load(), nullptr);
     if (auto xml = apvts.copyState().createXml())
         copyXmlToBinary(*xml, destData);
 }
@@ -233,6 +258,7 @@ void WT8AudioProcessor::setStateInformation(const void* data, int sizeInBytes)
             // (A parameter missing from an older saved state comes back at its default: JUCE's APVTS does that itself,
             // and plugin_test checks it, so a project saved by v0.3 plays as before.)
             seq_.deserialize(apvts.state.getProperty("sequence").toString().toStdString());
+            setSeqTranspose((int) apvts.state.getProperty("transpose", 0)); // states saved before v0.5 have none: 0
             seq_.resetTransport();
             // Never start playing on its own just because a project was opened
             if (auto* play = apvts.getParameter("seq_play")) play->setValueNotifyingHost(0.f);

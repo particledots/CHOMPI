@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <initializer_list>
 #include <random>
 
 struct StepSequencer::Lock
@@ -32,7 +33,90 @@ double unitRandom(uint64_t key, uint64_t stream, long long k)
 }
 
 long long posMod(long long a, long long m) { return ((a % m) + m) % m; }
+
+// The scale table: the same 28 scales, in the same order and with the same names, as the Logic Scripter scripts
+// ("The Quartet"), so a scale number means the same thing in both. Each scale is a 12-bit mask of its pitch classes.
+constexpr unsigned M(std::initializer_list<int> intervals)
+{
+    unsigned m = 0;
+    for (int i : intervals) m |= 1u << i;
+    return m;
+}
+
+struct ScaleDef { const char* name; unsigned mask; };
+constexpr ScaleDef kScaleTable[StepSequencer::kNumScales] = {
+    {"Major (Ionian)",             M({0, 2, 4, 5, 7, 9, 11})},
+    {"Dorian",                     M({0, 2, 3, 5, 7, 9, 10})},
+    {"Phrygian",                   M({0, 1, 3, 5, 7, 8, 10})},
+    {"Lydian",                     M({0, 2, 4, 6, 7, 9, 11})},
+    {"Mixolydian",                 M({0, 2, 4, 5, 7, 9, 10})},
+    {"Aeolian (Natural Minor)",    M({0, 2, 3, 5, 7, 8, 10})},
+    {"Locrian",                    M({0, 1, 3, 5, 6, 8, 10})},
+    {"Harmonic Minor",             M({0, 2, 3, 5, 7, 8, 11})},
+    {"Melodic Minor",              M({0, 2, 3, 5, 7, 9, 11})},
+    {"Harmonic Major",             M({0, 2, 4, 5, 7, 8, 11})},
+    {"Hungarian Minor",            M({0, 2, 3, 6, 7, 8, 11})},
+    {"Phrygian Dominant",          M({0, 1, 4, 5, 7, 8, 10})},
+    {"Double Harmonic (Byzantine)", M({0, 1, 4, 5, 7, 8, 11})},
+    {"Neapolitan Minor",           M({0, 1, 3, 5, 7, 8, 11})},
+    {"Neapolitan Major",           M({0, 1, 3, 5, 7, 9, 11})},
+    {"Enigmatic",                  M({0, 1, 4, 6, 8, 10, 11})},
+    {"Major Pentatonic",           M({0, 2, 4, 7, 9})},
+    {"Minor Pentatonic",           M({0, 3, 5, 7, 10})},
+    {"Blues",                      M({0, 3, 5, 6, 7, 10})},
+    {"Hirajoshi",                  M({0, 2, 3, 7, 8})},
+    {"In Sen",                     M({0, 1, 5, 7, 10})},
+    {"Kumoi",                      M({0, 2, 3, 7, 9})},
+    {"Iwato",                      M({0, 1, 5, 6, 10})},
+    {"Whole Tone",                 M({0, 2, 4, 6, 8, 10})},
+    {"Octatonic (Whole-Half)",     M({0, 2, 3, 5, 6, 8, 9, 11})},
+    {"Octatonic (Half-Whole)",     M({0, 1, 3, 4, 6, 7, 9, 10})},
+    {"Prometheus",                 M({0, 2, 4, 6, 9, 10})},
+    {"Chromatic",                  M({0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11})},
+};
 } // namespace
+
+const char* StepSequencer::scaleName(int scale)
+{
+    return kScaleTable[std::max(0, std::min(kNumScales - 1, scale))].name;
+}
+
+bool StepSequencer::inScale(int note, int root, int scale)
+{
+    if (scale < 0 || scale >= kNumScales) return true;
+    const int pc = (int) posMod((long long) note - root, 12);
+    return (kScaleTable[scale].mask >> pc) & 1u;
+}
+
+int StepSequencer::quantizeNote(int note, int root, int scale)
+{
+    note = std::max(0, std::min(127, note));
+    if (scale < 0 || scale >= kNumScales) return note;
+    for (int d = 0; d <= 12; ++d)
+    {
+        const int lo = note - d; // checked first, so a note exactly between two tones snaps down
+        if (lo >= 0 && inScale(lo, root, scale)) return lo;
+        const int hi = note + d;
+        if (hi <= 127 && inScale(hi, root, scale)) return hi;
+    }
+    return note;
+}
+
+int StepSequencer::scaleStep(int note, int dir, int root, int scale)
+{
+    note = std::max(0, std::min(127, note));
+    if (dir == 0) return note;
+    const int step = dir > 0 ? 1 : -1;
+    if (scale < 0 || scale >= kNumScales) return std::max(0, std::min(127, note + step));
+    for (int n = note + step; n >= 0 && n <= 127; n += step)
+        if (inScale(n, root, scale)) return n;
+    return note;
+}
+
+int StepSequencer::playedNote(int note, int transpose, int root, int scale)
+{
+    return quantizeNote(std::max(0, std::min(127, note + transpose)), root, scale);
+}
 
 StepSequencer::StepSequencer()
 {
@@ -232,6 +316,7 @@ void StepSequencer::resetTransport()
     held_ = false;
     gateOffPpq_ = -1.0;
     displayIdx_.store(-1, std::memory_order_relaxed);
+    running_.store(false, std::memory_order_relaxed);
 }
 
 int StepSequencer::process(double sr, int numSamples, const SeqHostInfo& h, const SeqSettings& s,
@@ -251,6 +336,7 @@ int StepSequencer::process(double sr, int numSamples, const SeqHostInfo& h, cons
     if (!s.recording && len_ > 0)
         running = s.followHost ? (h.hostPlaying && h.havePpq) : s.play;
 
+    running_.store(running, std::memory_order_relaxed);
     if (!running)
     {
         releaseHeld(0);
@@ -318,9 +404,11 @@ int StepSequencer::process(double sr, int numSamples, const SeqHostInfo& h, cons
         }
         if (fire)
         {
-            emit(off, true, st.note, st.vel);
+            // v0.5: the note that sounds is the stored note, transposed, then snapped to the scale (if one is set)
+            const int played = playedNote(st.note, s.transpose, s.root, s.scale);
+            emit(off, true, played, st.vel);
             held_ = true;
-            heldNote_ = st.note;
+            heldNote_ = played;
             gateOffPpq_ = s.gate < 0.999f ? b + (double) s.gate * stepLen : -1.0;
         }
         ++k;

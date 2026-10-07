@@ -17,7 +17,7 @@ class IpmohcLookAndFeel : public juce::LookAndFeel_V4
 };
 
 // 32 clickable steps (2 rows of 16). Two lanes:
-//   PITCH: click = note/rest, drag up/down or mouse wheel = pitch.
+//   PITCH: click = note/rest, drag up/down or mouse wheel = pitch (in scale steps when a scale is set).
 //   PROB:  drag up/down or mouse wheel = that step's probability, double-click = back to 100%.
 class StepGrid : public juce::Component
 {
@@ -27,6 +27,7 @@ class StepGrid : public juce::Component
     explicit StepGrid(StepSequencer& s) : seq_(s) {}
     void refresh(); // pulls the pattern from the sequencer, repaints if anything changed
     void setLane(Lane l) { if (l != lane_) { lane_ = l; repaint(); } }
+    void setScale(int scale, int root) { scale_ = scale; root_ = root; } // scale -1 = off: pitch editing is chromatic
     void paint(juce::Graphics&) override;
     void mouseDown(const juce::MouseEvent&) override;
     void mouseDrag(const juce::MouseEvent&) override;
@@ -44,6 +45,7 @@ class StepGrid : public juce::Component
     int dragIdx_ = -1, dragStartY_ = 0, dragStartNote_ = 0, dragStartProb_ = 100;
     bool dragged_ = false;
     Lane lane_ = Lane::Pitch;
+    int scale_ = -1, root_ = 0;
 };
 
 class WT8Editor : public juce::AudioProcessorEditor, private juce::Timer
@@ -86,10 +88,11 @@ class WT8Editor : public juce::AudioProcessorEditor, private juce::Timer
     StepGrid grid_;
     juce::TextButton recBtn_{"REC"}, restBtn_{"REST"}, delBtn_{"DEL"}, clearBtn_{"CLEAR"}, playBtn_{"PLAY"}, muteBtn_{"MUTE"};
     juce::TextButton pitchLaneBtn_{"PITCH"}, probLaneBtn_{"PROB"}, pendBtn_{"ENDS x2"};
-    juce::ComboBox syncBox_, divBox_, dirBox_;
-    juce::Label syncLabel_, divLabel_, laneLabel_, dirLabel_;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> playAtt_, muteAtt_, pendAtt_;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> syncAtt_, divAtt_, dirAtt_;
+    juce::TextButton xposeBtn_{"MIDI XPOSE"}, xposeResetBtn_{"RESET"};
+    juce::ComboBox syncBox_, divBox_, dirBox_, scaleBox_, rootBox_;
+    juce::Label syncLabel_, divLabel_, laneLabel_, dirLabel_, scaleLabel_, rootLabel_, xposeReadout_;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> playAtt_, muteAtt_, pendAtt_, xposeAtt_;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> syncAtt_, divAtt_, dirAtt_, scaleAtt_, rootAtt_;
     std::vector<Knob*> seqKnobs_; // GATE, PROB / LOOP, SEED (2 x 2 block at the right of the strip)
     juce::Rectangle<int> seqBounds_;
 

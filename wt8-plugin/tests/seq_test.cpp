@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cmath>
+#include <string>
 #include <vector>
 
 struct Ev { long long pos; bool on; int note; };
@@ -268,6 +269,111 @@ int main()
         t.setProb(0, 500); t.snapshot(stp, len, idx); CHECK(stp[0].prob == 100, "setProb clamps high");
         t.setProb(0, -9); t.snapshot(stp, len, idx); CHECK(stp[0].prob == 0, "setProb clamps low");
         t.setProb(5, 10); t.deleteLast(); t.recordNote(61, 90); t.snapshot(stp, len, idx); CHECK(stp[0].prob == 100, "a fresh step starts at 100%%");
+    }
+
+    // ================================ v0.5: scale quantizing and transpose ================================
+    const int kC = 0, kD = 2, kCMaj = 0, kCMajPent = 16, kChromatic = 27, kAeolian = 5;
+
+    printf("T16 scale table and helpers: 28 scales, snapping (ties go down), editing steps, transpose then quantize\n");
+    {
+        CHECK(StepSequencer::kNumScales == 28, "28 scales");
+        CHECK(std::string(StepSequencer::scaleName(0)) == "Major (Ionian)" && std::string(StepSequencer::scaleName(5)) == "Aeolian (Natural Minor)"
+              && std::string(StepSequencer::scaleName(12)) == "Double Harmonic (Byzantine)" && std::string(StepSequencer::scaleName(27)) == "Chromatic", "scale names");
+        // C major
+        for (int n : {60, 62, 64, 65, 67, 69, 71, 72}) CHECK(StepSequencer::inScale(n, kC, kCMaj), "%d is in C major", n);
+        for (int n : {61, 63, 66, 68, 70}) CHECK(!StepSequencer::inScale(n, kC, kCMaj), "%d is not in C major", n);
+        // snapping: between two tones goes DOWN, otherwise to the nearest
+        const struct { int in, out; } cmaj[] = {{60, 60}, {61, 60}, {63, 62}, {66, 65}, {68, 67}, {70, 69}};
+        for (auto& c : cmaj) CHECK(StepSequencer::quantizeNote(c.in, kC, kCMaj) == c.out, "C major: %d -> %d (got %d)", c.in, c.out, StepSequencer::quantizeNote(c.in, kC, kCMaj));
+        CHECK(StepSequencer::quantizeNote(65, kC, kCMajPent) == 64 && StepSequencer::quantizeNote(66, kC, kCMajPent) == 67, "C major pentatonic: 65 -> 64, 66 -> 67 (nearest, not always down)");
+        CHECK(StepSequencer::quantizeNote(60, kD, kCMaj) == 59 && StepSequencer::quantizeNote(61, kD, kCMaj) == 61, "D major: 60 -> 59 (tie goes down), 61 is already in the scale");
+        CHECK(StepSequencer::quantizeNote(0, 1, kCMajPent) == 1 && StepSequencer::quantizeNote(127, kC, kCMaj) == 127 && StepSequencer::quantizeNote(126, kC, kCMaj) == 125, "keyboard ends");
+        CHECK(StepSequencer::quantizeNote(61, kC, -1) == 61 && StepSequencer::quantizeNote(61, kC, kChromatic) == 61, "scale off and Chromatic leave notes alone");
+        CHECK(StepSequencer::quantizeNote(200, kC, -1) == 127 && StepSequencer::quantizeNote(-5, kC, -1) == 0, "out-of-range notes are clamped");
+        // exhaustive: every scale x root x note must land on a scale tone that no other tone beats (ties down)
+        int bad = 0;
+        for (int sc = 0; sc < StepSequencer::kNumScales; ++sc)
+            for (int rt = 0; rt < 12; ++rt)
+                for (int n = 0; n < 128; ++n)
+                {
+                    int best = -1, bestDist = 1000;
+                    for (int m = 0; m < 128; ++m)
+                        if (StepSequencer::inScale(m, rt, sc) && (std::abs(m - n) < bestDist)) { bestDist = std::abs(m - n); best = m; } // first hit wins = lowest on a tie
+                    if (StepSequencer::quantizeNote(n, rt, sc) != best) ++bad;
+                }
+        CHECK(bad == 0, "exhaustive snap check failed %d times", bad);
+        // editing steps
+        CHECK(StepSequencer::scaleStep(60, 1, kC, kCMaj) == 62 && StepSequencer::scaleStep(60, -1, kC, kCMaj) == 59, "scale step from 60");
+        CHECK(StepSequencer::scaleStep(61, 1, kC, kCMaj) == 62 && StepSequencer::scaleStep(61, -1, kC, kCMaj) == 60, "scale step from a note outside the scale");
+        CHECK(StepSequencer::scaleStep(127, 1, kC, kCMaj) == 127 && StepSequencer::scaleStep(0, -1, kC, kCMaj) == 0, "scale step stays put at the ends");
+        CHECK(StepSequencer::scaleStep(60, 1, kC, -1) == 61 && StepSequencer::scaleStep(60, -1, kC, -1) == 59 && StepSequencer::scaleStep(127, 1, kC, -1) == 127, "scale off = semitone steps");
+        // playedNote: transpose first, then snap
+        CHECK(StepSequencer::playedNote(60, 0, kC, kCMaj) == 60 && StepSequencer::playedNote(60, 2, kC, kCMaj) == 62 && StepSequencer::playedNote(60, 1, kC, kCMaj) == 60, "playedNote in C major");
+        CHECK(StepSequencer::playedNote(60, 7, kC, -1) == 67 && StepSequencer::playedNote(60, -12, kC, -1) == 48, "transpose without a scale is a plain shift");
+        CHECK(StepSequencer::playedNote(120, 20, kC, -1) == 127 && StepSequencer::playedNote(5, -20, kC, -1) == 0, "transposed notes are kept inside 0..127");
+        CHECK(StepSequencer::playedNote(57, 0, 9, kAeolian) == 57 && StepSequencer::playedNote(58, 0, 9, kAeolian) == 57, "A natural minor");
+    }
+
+    printf("T17 the sequencer plays transposed / quantized notes and leaves the stored pattern alone\n");
+    {
+        StepSequencer s; fill(s, {60, 62, 64, 65}); const std::string before = s.serialize();
+        SeqSettings d = st; d.gate = 0.5f;
+        auto play = [&](int scale, int root, int transpose) {
+            StepSequencer q; fill(q, {60, 62, 64, 65}); SeqSettings x = d; x.scale = scale; x.root = root; x.transpose = transpose;
+            return run(q, x, bpm, sr, 512, 4 * step16, false);
+        };
+        CHECK(onNotes(play(-1, 0, 0)) == std::vector<int>({60, 62, 64, 65}), "defaults play the pattern as recorded");
+        CHECK(onNotes(play(kCMaj, kC, 0)) == std::vector<int>({60, 62, 64, 65}), "a pattern already in the scale is untouched");
+        CHECK(onNotes(play(-1, 0, 3)) == std::vector<int>({63, 65, 67, 68}), "transpose +3, no scale");
+        CHECK(onNotes(play(kCMaj, kC, 1)) == std::vector<int>({60, 62, 65, 65}), "transpose +1 then C major: 61->60, 63->62, 65, 66->65");
+        CHECK(onNotes(play(kCMaj, kC, 2)) == std::vector<int>({62, 64, 65, 67}), "transpose +2 then C major: 62, 64, 66->65, 67");
+        CHECK(onNotes(play(kCMaj, kC, -12)) == std::vector<int>({48, 50, 52, 53}), "transpose -12 (an octave down)");
+        CHECK(onNotes(play(kCMajPent, kC, 0)) == std::vector<int>({60, 62, 64, 64}), "C major pentatonic: F (65) snaps down to E (64)");
+        // every note-off carries the note that actually sounded
+        const auto e = play(kCMaj, kC, 1); bool offsMatch = true; int last = -1;
+        for (auto& x : e) { if (x.on) last = x.note; else offsMatch = offsMatch && x.note == last; }
+        CHECK(offsMatch && !e.empty(), "note-offs use the transposed/quantized note");
+        // nothing above touched the stored pattern
+        CHECK(s.serialize() == before, "stored pattern unchanged");
+        // same events at any block size, and relative to the host position in Logic sync
+        SeqSettings x = d; x.scale = kAeolian; x.root = 9; x.transpose = 5; x.direction = 2;
+        StepSequencer a, b, c; fill(a, {57, 60, 62, 64, 67}); fill(b, {57, 60, 62, 64, 67}); fill(c, {57, 60, 62, 64, 67});
+        const auto ea = run(a, x, bpm, sr, 64, 30 * step16, false), eb = run(b, x, bpm, sr, 997, 30 * step16, false);
+        CHECK(!ea.empty() && sameEvents(ea, eb), "block-size independence with scale + transpose");
+        x.followHost = true; x.play = false;
+        const auto fullL = run(a, x, bpm, sr, 512, 8 * 24000, true, 0.0), lateL = run(c, x, bpm, sr, 333, 4 * 24000, true, 4.0);
+        std::vector<Ev> refL; for (auto& y : fullL) if (y.pos >= 96000) refL.push_back({y.pos - 96000, y.on, y.note});
+        CHECK(!refL.empty() && sameEvents(refL, lateL), "Logic sync still depends only on the host position with scale + transpose");
+    }
+
+    printf("T18 changing transpose / scale while a note sounds: the note that is held is the one that gets released\n");
+    {
+        StepSequencer s; fill(s, {60, 62}); SeqEvent buf[64]; SeqHostInfo h; h.hostPlaying = true; h.havePpq = true; h.bpm = bpm;
+        SeqSettings d = st; d.gate = 1.f; // legato: a note ends exactly when the next starts
+        int c = s.process(sr, 3000, h, d, buf, 64);
+        CHECK(c == 1 && buf[0].on && buf[0].note == 60, "step 1 sounds 60");
+        d.transpose = 5; d.scale = kCMaj; // changed mid-note: nothing happens until the next step
+        c = s.process(sr, 3000, h, d, buf, 64);
+        CHECK(c == 0, "no event until the next step boundary (got %d)", c);
+        c = s.process(sr, 3000, h, d, buf, 64);
+        CHECK(c == 2 && !buf[0].on && buf[0].note == 60 && buf[1].on && buf[1].note == 67, "off for the note that was sounding (60), then on 62+5=67");
+        d.transpose = 0; d.scale = -1; s.resetTransport();
+        c = s.process(sr, 3000, h, d, buf, 64); CHECK(c >= 1 && buf[c - 1].on && buf[c - 1].note == 60, "back to the stored pattern after resetting");
+    }
+
+    printf("T19 isRunning(): follows PLAY / host transport, empty pattern and record\n");
+    {
+        StepSequencer s; SeqEvent buf[64]; SeqHostInfo h; h.hostPlaying = true; h.havePpq = true; h.bpm = bpm; SeqSettings d = st;
+        CHECK(!s.isRunning(), "idle at the start");
+        s.process(sr, 512, h, d, buf, 64); CHECK(!s.isRunning(), "an empty pattern never runs");
+        fill(s, {60, 62});
+        s.process(sr, 512, h, d, buf, 64); CHECK(s.isRunning(), "PLAY with a pattern runs");
+        SeqSettings m = d; m.mute = true; s.process(sr, 512, h, m, buf, 64); CHECK(s.isRunning(), "mute keeps it running (it only silences the notes)");
+        SeqSettings r = d; r.recording = true; s.process(sr, 512, h, r, buf, 64); CHECK(!s.isRunning(), "record armed: not running");
+        s.process(sr, 512, h, d, buf, 64); CHECK(s.isRunning(), "running again");
+        SeqSettings stop = d; stop.play = false; s.process(sr, 512, h, stop, buf, 64); CHECK(!s.isRunning(), "PLAY off: not running");
+        SeqSettings f = d; f.followHost = true; f.play = false; h.hostPlaying = false; s.process(sr, 512, h, f, buf, 64); CHECK(!s.isRunning(), "Logic sync, host stopped");
+        h.hostPlaying = true; s.process(sr, 512, h, f, buf, 64); CHECK(s.isRunning(), "Logic sync, host playing");
     }
 
     printf(failures ? "FAIL (%d)\n" : "PASS\n", failures);

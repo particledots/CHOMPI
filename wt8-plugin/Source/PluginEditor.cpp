@@ -194,7 +194,8 @@ void StepGrid::mouseDrag(const juce::MouseEvent& e)
     if (std::abs(dy) > 4) dragged_ = true;
     if (!dragged_) return;
     if (lane_ == Lane::Prob) seq_.setProb(dragIdx_, juce::jlimit(0, 100, dragStartProb_ + dy)); // 1 pixel = 1 %
-    else                     seq_.setNote(dragIdx_, juce::jlimit(0, 127, dragStartNote_ + dy / 6));
+    else // with a scale set the stored note snaps to a scale tone while dragging
+        seq_.setNote(dragIdx_, StepSequencer::quantizeNote(juce::jlimit(0, 127, dragStartNote_ + dy / 6), root_, scale_));
     refresh();
 }
 
@@ -222,7 +223,7 @@ void StepGrid::mouseWheelMove(const juce::MouseEvent& e, const juce::MouseWheelD
     const int i = cellAt(e.getPosition());
     if (i < 0 || i >= len_ || steps_[i].rest || w.deltaY == 0.0f) return;
     if (lane_ == Lane::Prob) seq_.setProb(i, juce::jlimit(0, 100, (int) steps_[i].prob + (w.deltaY > 0 ? 5 : -5)));
-    else                     seq_.setNote(i, juce::jlimit(0, 127, (int) steps_[i].note + (w.deltaY > 0 ? 1 : -1)));
+    else                     seq_.setNote(i, StepSequencer::scaleStep(steps_[i].note, w.deltaY > 0 ? 1 : -1, root_, scale_)); // one scale step per notch
     refresh();
 }
 
@@ -375,6 +376,10 @@ WT8Editor::WT8Editor(WT8AudioProcessor& p) : juce::AudioProcessorEditor(&p), pro
     fillCombo(syncBox_, "seq_sync");
     fillCombo(divBox_, "seq_div");
     fillCombo(dirBox_, "seq_dir");
+    fillCombo(scaleBox_, "seq_scale");
+    fillCombo(rootBox_, "seq_root");
+    scaleAtt_ = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(proc_.apvts, "seq_scale", scaleBox_);
+    rootAtt_ = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(proc_.apvts, "seq_root", rootBox_);
     syncAtt_ = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(proc_.apvts, "seq_sync", syncBox_);
     divAtt_ = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(proc_.apvts, "seq_div", divBox_);
     dirAtt_ = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(proc_.apvts, "seq_dir", dirBox_);
@@ -394,7 +399,18 @@ WT8Editor::WT8Editor(WT8AudioProcessor& p) : juce::AudioProcessorEditor(&p), pro
     addAndMakeVisible(pendBtn_);
     pendAtt_ = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(proc_.apvts, "seq_pendrep", pendBtn_);
 
-    for (auto* l : {&syncLabel_, &divLabel_, &laneLabel_, &dirLabel_})
+    // MIDI XPOSE: while on, the last key played sets the pattern transpose (C3 = none); RESET puts it back to 0
+    addAndMakeVisible(xposeBtn_);
+    xposeBtn_.setClickingTogglesState(true);
+    xposeAtt_ = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(proc_.apvts, "seq_xpose", xposeBtn_);
+    addAndMakeVisible(xposeResetBtn_);
+    xposeResetBtn_.onClick = [this] { proc_.setSeqTranspose(0); };
+    addAndMakeVisible(xposeReadout_);
+    xposeReadout_.setJustificationType(juce::Justification::centred);
+    xposeReadout_.getProperties().set("fontHeight", 13.0f);
+    xposeReadout_.setInterceptsMouseClicks(false, false);
+
+    for (auto* l : {&syncLabel_, &divLabel_, &laneLabel_, &dirLabel_, &scaleLabel_, &rootLabel_})
     {
         l->setJustificationType(juce::Justification::centredRight);
         l->setColour(juce::Label::textColourId, kDim);
@@ -406,13 +422,16 @@ WT8Editor::WT8Editor(WT8AudioProcessor& p) : juce::AudioProcessorEditor(&p), pro
     divLabel_.setText("STEP", juce::dontSendNotification);
     laneLabel_.setText("EDIT", juce::dontSendNotification);
     dirLabel_.setText("DIRECTION", juce::dontSendNotification);
+    scaleLabel_.setText("SCALE", juce::dontSendNotification);
+    rootLabel_.setText("ROOT", juce::dontSendNotification);
     addAndMakeVisible(grid_);
 
     setResizable(true, true);
-    setResizeLimits(630, 518, 1260, 1035);
-    getConstrainer()->setFixedAspectRatio(840.0 / 690.0);
-    setSize(840, 690);
+    setResizeLimits(630, 545, 1260, 1089);
+    getConstrainer()->setFixedAspectRatio(840.0 / 726.0);
+    setSize(840, 726);
     grid_.refresh();
+    timerCallback(); // fill in the transpose readout and scale state straight away
     startTimerHz(15);
 }
 
@@ -422,6 +441,15 @@ void WT8Editor::timerCallback()
     recBtn_.setToggleState(proc_.isSeqRecording(), juce::dontSendNotification);
     playBtn_.setEnabled(syncBox_.getSelectedItemIndex() == 0); // in "Logic" sync, Logic's transport is the play button
     pendBtn_.setEnabled(dirBox_.getSelectedItemIndex() == 2);  // end-repeat only applies to the pendulum
+
+    // scale (item 0 of the box = Off) for the grid's pitch editing
+    grid_.setScale(scaleBox_.getSelectedItemIndex() - 1, rootBox_.getSelectedItemIndex());
+
+    // transpose readout: lit while MIDI XPOSE is on, dim (the pattern plays as recorded) while it is off
+    const int xp = proc_.getSeqTranspose();
+    const bool xposeOn = xposeBtn_.getToggleState();
+    xposeReadout_.setText((xp > 0 ? "+" : "") + juce::String(xp) + " st", juce::dontSendNotification);
+    xposeReadout_.setColour(juce::Label::textColourId, xposeOn ? kAccent : kDim);
 }
 
 WT8Editor::~WT8Editor()
@@ -534,8 +562,9 @@ void WT8Editor::resized()
         }
     }
 
-    for (auto* l : {&syncLabel_, &divLabel_, &laneLabel_, &dirLabel_})
+    for (auto* l : {&syncLabel_, &divLabel_, &laneLabel_, &dirLabel_, &scaleLabel_, &rootLabel_})
         l->getProperties().set("fontHeight", 11.0f * scale);
+    xposeReadout_.getProperties().set("fontHeight", 13.0f * scale);
 
     // row A: pattern editing, transport, timing
     auto controls = inner.removeFromTop(int(30 * scale));
@@ -552,6 +581,13 @@ void WT8Editor::resized()
     put(laneLabel_, 34); put(pitchLaneBtn_, 54); put(probLaneBtn_, 54);
     controls.removeFromLeft(int(14 * scale));
     put(dirLabel_, 66); put(dirBox_, 92); put(pendBtn_, 62);
+
+    // row C (v0.5): scale quantizing and transpose from MIDI in
+    inner.removeFromTop(int(6 * scale));
+    controls = inner.removeFromTop(int(30 * scale));
+    put(scaleLabel_, 40); put(scaleBox_, 170); put(rootLabel_, 34); put(rootBox_, 52);
+    controls.removeFromLeft(int(14 * scale));
+    put(xposeBtn_, 82); put(xposeReadout_, 52); put(xposeResetBtn_, 52);
 
     inner.removeFromTop(int(6 * scale));
     grid_.setBounds(inner);

@@ -42,6 +42,11 @@ class WT8AudioProcessor : public juce::AudioProcessor
     bool isSeqRecording() const { return seqRecording_.load(); }
     void setSeqRecording(bool on) { seqRecording_.store(on); }
 
+    // v0.5: pattern transpose in semitones, set by the last key played into the plugin while MIDI XPOSE is on
+    // (the key C3 = 0). It stays until another key is played or RESET is pressed, and is saved with the project.
+    int  getSeqTranspose() const { return seqTranspose_.load(); }
+    void setSeqTranspose(int semitones) { seqTranspose_.store(juce::jlimit(-127, 127, semitones)); }
+
   private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
     void loadWavetables(WT8Engine& e);
@@ -52,6 +57,7 @@ class WT8AudioProcessor : public juce::AudioProcessor
 
     StepSequencer seq_;
     std::atomic<bool> seqRecording_{false};
+    std::atomic<int> seqTranspose_{0};
     SeqEvent seqEvents_[64];
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(WT8AudioProcessor)
