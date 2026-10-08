@@ -8,6 +8,7 @@ Sub-commands:
   morph     two waveforms, spectrally morphed across the 33 frames      (math)
   sweep     one waveform whose brightness opens from a sine to full     (math)
   slice     cut a recording into 33 frames                              (from your own audio)
+  stack     join several single-cycle files (e.g. AKWF) as the frames of one table
   convert   turn an external wavetable (e.g. Serum style, any number of 2048-sample frames) into this format
   check     report on any .wav: is it a valid ipmohc table, and what does it look like
 
@@ -176,13 +177,46 @@ def make_convert(x, frame_size):
         i0 = pos.astype(int)
         f = pos - i0
         src = src[:, i0] * (1 - f) + src[:, (i0 + 1) % frame_size] * f
+    return frames_to_table(src)
+
+
+def frames_to_table(src):
+    """Map any number of 2048-sample frames onto 33 (first and last kept, in-between blended)."""
+    n = len(src)
     fr = []
     for i in range(FRAMES):
-        p = i * (n - 1) / (FRAMES - 1) if n > 1 else 0.0   # first and last frame stay exactly the file's first and last
+        p = i * (n - 1) / (FRAMES - 1) if n > 1 else 0.0
         j = int(np.floor(p))
         f = p - j
         fr.append(src[j] if f == 0 or j + 1 >= n else src[j] * (1 - f) + src[j + 1] * f)
     return finish(fr)
+
+
+def cycle_to_frame(x):
+    """One single-cycle file (any length) as a 2048-sample frame (periodic interpolation)."""
+    pos = np.arange(N) * len(x) / N
+    i0 = pos.astype(int)
+    f = pos - i0
+    return x[i0 % len(x)] * (1 - f) + x[(i0 + 1) % len(x)] * f
+
+
+def centroid(frame):
+    m = np.abs(np.fft.rfft(frame))[1:200]
+    return float((m * np.arange(1, len(m) + 1)).sum() / max(m.sum(), 1e-12))
+
+
+def make_stack(files, order):
+    """Join several single-cycle files as the frames of one table (they are spread over the 33 frames, blended in between).
+    order: 'given' keeps the order of the files, 'centroid' sorts them from dull to bright so the sweep is smooth."""
+    cyc = []
+    for f in files:
+        x, _ = read_wav(f)
+        if len(x) < 16:
+            raise ValueError(f"{f}: too short")
+        cyc.append(cycle_to_frame(x))
+    if order == "centroid":
+        cyc.sort(key=centroid)
+    return frames_to_table(np.stack(cyc))
 
 
 # ---------------------------------------------------------------- check
@@ -239,6 +273,10 @@ def main(argv=None):
     p.add_argument("input")
     p.add_argument("--frame-size", type=int, default=2048, help="samples per frame in the input (default 2048)")
     p.add_argument("--out", required=True)
+    p = sub.add_parser("stack", help="join several single-cycle .wav files as the frames of one table")
+    p.add_argument("files", nargs="+")
+    p.add_argument("--order", choices=("given", "centroid"), default="given", help="centroid = sort dull to bright (default: keep the order given)")
+    p.add_argument("--out", required=True)
     p = sub.add_parser("check")
     p.add_argument("files", nargs="+")
     a = ap.parse_args(argv)
@@ -254,6 +292,8 @@ def main(argv=None):
     elif a.cmd == "slice":
         x, _ = read_wav(a.input)
         t = make_slice(x, a.cycle_samples)
+    elif a.cmd == "stack":
+        t = make_stack(a.files, a.order)
     else:
         x, _ = read_wav(a.input)
         t = make_convert(x, a.frame_size)
