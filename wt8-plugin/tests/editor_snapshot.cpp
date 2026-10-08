@@ -1,4 +1,4 @@
-// Renders the plugin editor offscreen and writes a PNG:  ./editor_snapshot out.png [width] [lane] [view] [hover] [steps] [loop] [blocks]
+// Renders the plugin editor offscreen and writes a PNG:  ./editor_snapshot out.png [width] [lane] [view] [hover] [steps] [loop] [blocks] [slot]
 // lane: pitch (default), prob, ratch, gate, accent, oct, cond.  view: grid (default), ring, ring2 (ring, page 17-32), 2rings.
 // hover: step number (1-32) the ring's centre readout should describe, as if the mouse were over it (0 = none).
 // steps: pattern length (default 12; more steps are added with varied notes and probabilities).  loop: the LOOP knob (default 10, 0 = ALL).
@@ -37,6 +37,7 @@ int main(int argc, char** argv)
         const int blocks = 2 + (argc > 8 ? std::atoi(argv[8]) : 0);
         for (int i = 0; i < blocks; ++i) { m.clear(); proc.processBlock(b, m); }
     }
+    if (argc > 9) { proc.selectPatternSlot(std::atoi(argv[9]) - 1); proc.sequencer().recordNote(60, 100); } // v0.8: show the PATTERN box on another slot (that slot gets one note so it counts as used)
     std::unique_ptr<juce::AudioProcessorEditor> ed(proc.createEditor());
     const int w = argc > 2 ? std::atoi(argv[2]) : 840;
     ed->setSize(w, int(w * 862.0 / 840.0));

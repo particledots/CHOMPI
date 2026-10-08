@@ -467,6 +467,13 @@ void StepSequencer::recordNote(int note, int velocity)
     lastNote_ = s.note;
 }
 
+void StepSequencer::restart()
+{
+    Lock l(lock_);
+    wasRunning_ = false; // process() then starts over: Free sync from step 1 with a fresh random key
+    displayIdx_.store(-1, std::memory_order_relaxed);
+}
+
 void StepSequencer::resetTransport()
 {
     Lock l(lock_);

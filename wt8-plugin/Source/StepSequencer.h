@@ -129,6 +129,9 @@ class StepSequencer
     void toggleRest(int index);          // rest <-> note; past the end extends the pattern
     std::string serialize() const;
     void deserialize(const std::string& text);
+    /** v0.8 (pattern slots): after the pattern was swapped, play again from step 1 (Free sync). A note that is sounding is
+        not cut: it ends through its gate or when the next step starts. In Logic sync the position still comes from the host. */
+    void restart();
 
     // ---- audio thread ----
     void recordNote(int note, int velocity);

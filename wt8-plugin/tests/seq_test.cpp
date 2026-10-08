@@ -725,6 +725,45 @@ int main()
               "single ring: page 1 shows steps 1-16, page 2 steps 17-32");
     }
 
+    printf("T29 pattern slots (v0.8): swapping the pattern while playing + restart(): new pattern from step 1, no stuck note, empty pattern is silent\n");
+    {
+        // the first run ends at sample 20000: step 4 (65) started at 18000 and its gate (3000 samples) is still open
+        StepSequencer s; fill(s, {60, 62, 64, 65});
+        auto before = run(s, st, bpm, sr, 512, 20000, false);
+        int open = 0; for (auto& e : before) open += e.on ? 1 : -1;
+        CHECK(open == 1 && before.back().on && before.back().note == 65, "set-up: note 65 is sounding when the pattern is swapped (open=%d)", open);
+        s.deserialize("72:100,r,76:100"); s.restart();
+        auto after = run(s, st, bpm, sr, 512, 30000, false);
+        CHECK(after.size() >= 4, "events after the swap: %zu", after.size());
+        if (after.size() >= 4)
+        {
+            CHECK(!after[0].on && after[0].note == 65 && after[0].pos == 0, "the sounding note is released at the swap (pos %lld note %d on=%d)", after[0].pos, after[0].note, (int) after[0].on);
+            CHECK(after[1].on && after[1].note == 72 && after[1].pos == 0, "the new pattern starts at step 1 straight away (pos %lld note %d)", after[1].pos, after[1].note);
+        }
+        std::vector<Ev> ons; for (auto& e : after) if (e.on) ons.push_back(e);
+        CHECK(ons.size() >= 2 && ons[1].note == 76 && near(ons[1].pos, 12000), "then the rest and step 3 (note 76 at 12000, got %lld)", ons.size() >= 2 ? ons[1].pos : -1LL);
+        int bal = 1; bool alt = true; for (auto& e : after) { bal += e.on ? 1 : -1; if (bal < 0 || bal > 1) alt = false; }
+        CHECK(alt, "notes after the swap alternate on / off");
+
+        // an empty slot: swapping to nothing releases the note and plays nothing
+        StepSequencer z; fill(z, {60, 62, 64, 65});
+        run(z, st, bpm, sr, 512, 20000, false);
+        z.deserialize(""); z.restart();
+        auto none = run(z, st, bpm, sr, 512, 24000, false);
+        CHECK(none.size() == 1 && !none[0].on && none[0].note == 65, "an empty pattern: only the note-off of the sounding note (%zu events)", none.size());
+        CHECK(z.length() == 0, "empty pattern has length 0");
+
+        // swap with a different length while Logic sync is running: still position-locked, no stuck note
+        StepSequencer l; fill(l, {60, 62, 64, 65});
+        auto a = run(l, st, bpm, sr, 512, 20000, true);
+        l.deserialize("67,69,71,72,74,76,77"); l.restart();
+        auto b = run(l, st, bpm, sr, 512, 40000, true, 20000.0 / 24000.0 * 1.0);
+        int bal2 = 0; bool alt2 = true;
+        for (auto& e : a) bal2 += e.on ? 1 : -1;
+        for (auto& e : b) { bal2 += e.on ? 1 : -1; if (bal2 < 0 || bal2 > 1) alt2 = false; }
+        CHECK(alt2, "Logic sync: swapping to a 7-step pattern keeps notes alternating on / off");
+    }
+
     printf(failures ? "FAIL (%d)\n" : "PASS\n", failures);
     return failures ? 1 : 0;
 }

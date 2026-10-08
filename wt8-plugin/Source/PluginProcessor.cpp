@@ -254,8 +254,22 @@ juce::AudioProcessorEditor* WT8AudioProcessor::createEditor()
 
 void WT8AudioProcessor::getStateInformation(juce::MemoryBlock& destData)
 {
-    apvts.state.setProperty("sequence", juce::String(seq_.serialize()), nullptr);
+    const std::string live = seq_.serialize();
+    apvts.state.setProperty("sequence", juce::String(live), nullptr);
     apvts.state.setProperty("transpose", seqTranspose_.load(), nullptr);
+    {
+        // v0.8 pattern slots: the current slot is "sequence" above; the other slots that hold anything are saved as pat<n>.
+        // A project saved before v0.8 has none of these and loads with its pattern in slot 1.
+        const juce::ScopedLock sl(slotLock_);
+        slots_[slotCur_] = live;
+        for (int i = 0; i < kPatternSlots; ++i)
+        {
+            const juce::Identifier id("pat" + juce::String(i));
+            if (i != slotCur_ && !slots_[i].empty()) apvts.state.setProperty(id, juce::String(slots_[i]), nullptr);
+            else apvts.state.removeProperty(id, nullptr);
+        }
+        apvts.state.setProperty("patCur", slotCur_, nullptr);
+    }
     if (auto xml = apvts.copyState().createXml())
         copyXmlToBinary(*xml, destData);
 }
@@ -269,11 +283,135 @@ void WT8AudioProcessor::setStateInformation(const void* data, int sizeInBytes)
             // (A parameter missing from an older saved state comes back at its default: JUCE's APVTS does that itself,
             // and plugin_test checks it, so a project saved by v0.3 plays as before.)
             seq_.deserialize(apvts.state.getProperty("sequence").toString().toStdString());
+            {
+                const juce::ScopedLock sl(slotLock_);
+                slotCur_ = juce::jlimit(0, kPatternSlots - 1, (int) apvts.state.getProperty("patCur", 0));
+                for (int i = 0; i < kPatternSlots; ++i)
+                    slots_[i] = i == slotCur_ ? std::string() : apvts.state.getProperty(juce::Identifier("pat" + juce::String(i))).toString().toStdString();
+            }
             setSeqTranspose((int) apvts.state.getProperty("transpose", 0)); // states saved before v0.5 have none: 0
             seq_.resetTransport();
             // Never start playing on its own just because a project was opened
             if (auto* play = apvts.getParameter("seq_play")) play->setValueNotifyingHost(0.f);
         }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// v0.8 pattern slots
+int WT8AudioProcessor::getPatternSlot() const
+{
+    const juce::ScopedLock sl(slotLock_);
+    return slotCur_;
+}
+
+bool WT8AudioProcessor::patternSlotHasSteps(int slot) const
+{
+    if (slot < 0 || slot >= kPatternSlots) return false;
+    const juce::ScopedLock sl(slotLock_);
+    return slot == slotCur_ ? seq_.length() > 0 : !slots_[slot].empty();
+}
+
+void WT8AudioProcessor::selectPatternSlot(int slot)
+{
+    slot = juce::jlimit(0, kPatternSlots - 1, slot);
+    const juce::ScopedLock sl(slotLock_);
+    if (slot == slotCur_) return;
+    slots_[slotCur_] = seq_.serialize();
+    slotCur_ = slot;
+    seq_.deserialize(slots_[slot]); // swaps the steps under the sequencer's own lock; the audio thread just plays the new ones
+    seq_.restart();
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// v0.8 presets
+const juce::StringArray& WT8AudioProcessor::presetParameterIds()
+{
+    // The sound: oscillator, envelope, filter, LFOs, effects and the compressor / saturation. Not included on purpose: GAIN,
+    // PAN and BOOST (the level into the mixer, which a preset should not change), nor anything of the sequencer.
+    static const juce::StringArray ids{"table", "cycle", "octave", "pitch", "attack", "release", "cutoff", "resonance", "fx",
+                                       "fxtime", "pitchlfodepth", "pitchlforate", "filterlfodepth", "filterlforate", "comp"};
+    return ids;
+}
+
+juce::File WT8AudioProcessor::getPresetFolder() const
+{
+    if (presetFolderOverride_ != juce::File()) return presetFolderOverride_;
+    auto base = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory);
+#if JUCE_MAC
+    base = base.getChildFile("Application Support"); // JUCE gives ~/Library on the Mac
+#endif
+    return base.getChildFile("particledots").getChildFile("ipmohc").getChildFile("Presets");
+}
+
+juce::String WT8AudioProcessor::presetFileName(const juce::String& name)
+{
+    const auto legal = juce::File::createLegalFileName(name.trim()).trim();
+    return legal.isEmpty() ? juce::String() : legal + ".ipmohcpreset";
+}
+
+juce::StringArray WT8AudioProcessor::listPresets() const
+{
+    juce::StringArray names;
+    for (const auto& f : getPresetFolder().findChildFiles(juce::File::findFiles, false, "*.ipmohcpreset"))
+        names.add(f.getFileNameWithoutExtension());
+    names.sortNatural();
+    return names;
+}
+
+bool WT8AudioProcessor::savePreset(const juce::String& name, juce::String& error)
+{
+    const auto fileName = presetFileName(name);
+    if (fileName.isEmpty()) { error = "Please type a name."; return false; }
+    const auto folder = getPresetFolder();
+    if (!folder.createDirectory()) { error = "Could not create the preset folder:\n" + folder.getFullPathName(); return false; }
+
+    juce::XmlElement xml("ipmohcPreset");
+    xml.setAttribute("version", 1);
+    xml.setAttribute("name", fileName.upToLastOccurrenceOf(".ipmohcpreset", false, false));
+    for (const auto& id : presetParameterIds())
+        if (auto* p = apvts.getParameter(id))
+        {
+            auto* e = xml.createNewChildElement("P");
+            e->setAttribute("id", id);
+            e->setAttribute("v", (double) p->convertFrom0to1(p->getValue()));
+        }
+    if (!folder.getChildFile(fileName).replaceWithText(xml.toString()))
+    {
+        error = "Could not write the file:\n" + folder.getChildFile(fileName).getFullPathName();
+        return false;
+    }
+    return true;
+}
+
+void WT8AudioProcessor::applyPresetValues(const std::map<juce::String, float>& values)
+{
+    for (const auto& id : presetParameterIds())
+        if (auto* p = apvts.getParameter(id))
+        {
+            const auto it = values.find(id);
+            const float real = it != values.end() ? it->second : p->convertFrom0to1(p->getDefaultValue());
+            p->beginChangeGesture();
+            p->setValueNotifyingHost(juce::jlimit(0.f, 1.f, p->convertTo0to1(real)));
+            p->endChangeGesture();
+        }
+}
+
+bool WT8AudioProcessor::loadPreset(const juce::String& name)
+{
+    const auto fileName = presetFileName(name);
+    if (fileName.isEmpty()) return false;
+    const auto xml = juce::parseXML(getPresetFolder().getChildFile(fileName));
+    if (xml == nullptr || !xml->hasTagName("ipmohcPreset")) return false;
+    std::map<juce::String, float> values;
+    for (auto* e : xml->getChildWithTagNameIterator("P"))
+        if (e->hasAttribute("id") && e->hasAttribute("v")) values[e->getStringAttribute("id")] = (float) e->getDoubleAttribute("v");
+    applyPresetValues(values); // (a name or value this version does not know is ignored; one the file lacks gets its default)
+    return true;
+}
+
+void WT8AudioProcessor::loadInitPreset()
+{
+    applyPresetValues({});
 }
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()

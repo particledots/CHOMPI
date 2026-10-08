@@ -2,6 +2,8 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <memory>
 #include <atomic>
+#include <map>
+#include <string>
 #include "StepSequencer.h"
 
 class WT8Engine;
@@ -47,6 +49,28 @@ class WT8AudioProcessor : public juce::AudioProcessor
     int  getSeqTranspose() const { return seqTranspose_.load(); }
     void setSeqTranspose(int semitones) { seqTranspose_.store(juce::jlimit(-127, 127, semitones)); }
 
+    // ---- v0.8 pattern slots: 16 patterns saved inside the project. The sequencer always plays the current slot; the other
+    // slots are kept as text. Only the steps belong to a slot (not direction, loop, scale, swing... and not the transpose).
+    // Message thread only (the editor); the audio thread never touches the slots, it only plays seq_.
+    static constexpr int kPatternSlots = 16;
+    int  getPatternSlot() const;
+    bool patternSlotHasSteps(int slot) const;  // the current slot asks the live pattern, the others their saved text
+    /** Saves the live pattern into the current slot, makes `slot` current and plays it from now on (an empty slot is silent). */
+    void selectPatternSlot(int slot);
+
+    // ---- v0.8 presets: the SOUND settings (not the sequencer, the pattern, or the output level/pan) as small files in a
+    // folder on the computer, so they are available in every project.
+    static const juce::StringArray& presetParameterIds();     // the parameters a preset stores
+    juce::File getPresetFolder() const;
+    void setPresetFolder(const juce::File& f) { presetFolderOverride_ = f; } // tests use their own folder
+    juce::StringArray listPresets() const;                    // names (no extension), sorted
+    /** Writes `name` into the preset folder (replacing a preset of the same name). False with `error` filled in on failure. */
+    bool savePreset(const juce::String& name, juce::String& error);
+    /** Loads a preset by name: every sound parameter in the file is set, the ones it does not mention go to their defaults. */
+    bool loadPreset(const juce::String& name);
+    void loadInitPreset();                                    // all sound parameters back to their defaults
+    static juce::String presetFileName(const juce::String& name); // the legal file name for a preset name (without the folder)
+
   private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
     void loadWavetables(WT8Engine& e);
@@ -56,6 +80,11 @@ class WT8AudioProcessor : public juce::AudioProcessor
     bool engineReady_ = false;
 
     StepSequencer seq_;
+    mutable juce::CriticalSection slotLock_;            // guards slots_ / slotCur_ (never taken on the audio thread)
+    std::string slots_[kPatternSlots];                  // saved text of each slot; slots_[slotCur_] is stale, seq_ holds it
+    int slotCur_ = 0;
+    juce::File presetFolderOverride_;
+    void applyPresetValues(const std::map<juce::String, float>& values);
     std::atomic<bool> seqRecording_{false};
     std::atomic<int> seqTranspose_{0};
     // Room for the worst case a host can produce (very fast tempo, huge block, 1/32T steps with 8 repeats: ~540 events

@@ -453,7 +453,161 @@ int main()
         printf("v0.6 per-step expression + swing: %s\n", v6Ok ? "ok" : "FAILED");
     }
 
-    bool ok = seqOk && v4Ok && v5Ok && v6Ok && finite && peak > 0.02f && peak <= 1.5f && held > 0.005f && tail < held * 0.05f && std::fabs(cutoff - 0.2f) < 0.01f;
+    // ---- v0.8: presets (sound settings as files) and pattern slots (16 patterns inside the project) ----
+    bool v8Ok = true;
+    {
+        auto setPlain = [](WT8AudioProcessor& pr, const char* id, float plain) {
+            auto* p = dynamic_cast<juce::RangedAudioParameter*>(pr.apvts.getParameter(id));
+            p->setValueNotifyingHost(p->convertTo0to1(plain));
+        };
+        auto getPlain = [](WT8AudioProcessor& pr, const char* id) { return (float) *pr.apvts.getRawParameterValue(id); };
+        auto check = [&](bool cond, const char* what) { printf("  %s: %s\n", cond ? "ok  " : "FAIL", what); v8Ok = v8Ok && cond; };
+        auto makeProc = [&]() {
+            auto pr = std::make_unique<WT8AudioProcessor>();
+            pr->setPlayConfigDetails(0, 2, sr, bs); pr->prepareToPlay(sr, bs);
+            return pr;
+        };
+        auto near = [](float a, float b) { return std::fabs(a - b) < 1e-3f; };
+
+        // ---- presets ----
+        const auto folder = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("ipmohc_preset_test_" + juce::String(juce::Random::getSystemRandom().nextInt64()));
+        {
+            auto p = makeProc(); p->setPresetFolder(folder);
+            check(p->listPresets().isEmpty(), "preset folder that does not exist yet: empty list");
+            setPlain(*p, "cutoff", 0.2f); setPlain(*p, "table", 3.f); setPlain(*p, "comp", 0.7f); setPlain(*p, "pitch", -5.f); setPlain(*p, "octave", 1.f);
+            setPlain(*p, "gain", 0.3f); setPlain(*p, "pan", 0.8f); setPlain(*p, "output", 5.f);
+            juce::String err;
+            check(p->savePreset("My Sound/1", err) && err.isEmpty(), "save a preset (the name has a character that is not allowed in file names)");
+            check(p->listPresets().size() == 1 && folder.getNumberOfChildFiles(juce::File::findFiles, "*.ipmohcpreset") == 1, "one preset file in the folder");
+            const auto listed = p->listPresets()[0];
+            // change everything, then load it back
+            setPlain(*p, "cutoff", 0.9f); setPlain(*p, "table", 6.f); setPlain(*p, "comp", 0.1f); setPlain(*p, "pitch", 7.f); setPlain(*p, "octave", -1.f);
+            setPlain(*p, "gain", 0.6f); setPlain(*p, "pan", 0.1f); setPlain(*p, "output", -3.f); setPlain(*p, "seq_swing", 70.f); setPlain(*p, "seq_loop", 5.f);
+            p->sequencer().recordNote(64, 100);
+            check(p->loadPreset(listed), "load it back");
+            check(near(getPlain(*p, "cutoff"), 0.2f) && getPlain(*p, "table") == 3.f && near(getPlain(*p, "comp"), 0.7f) && near(getPlain(*p, "pitch"), -5.f) && getPlain(*p, "octave") == 1.f,
+                  "the sound settings come back (cutoff, table, comp, pitch, octave)");
+            check(near(getPlain(*p, "gain"), 0.6f) && near(getPlain(*p, "pan"), 0.1f) && near(getPlain(*p, "output"), -3.f), "GAIN, PAN and BOOST are not part of a preset");
+            check(near(getPlain(*p, "seq_swing"), 70.f) && getPlain(*p, "seq_loop") == 5.f && p->sequencer().length() == 1, "sequencer settings and the pattern are not touched");
+
+            // overwrite
+            setPlain(*p, "cutoff", 0.77f);
+            check(p->savePreset("My Sound/1", err) && p->listPresets().size() == 1, "saving the same name again replaces the file");
+            setPlain(*p, "cutoff", 0.1f); p->loadPreset(listed);
+            check(near(getPlain(*p, "cutoff"), 0.77f), "...and the new value is what loads");
+
+            // a file written by another version: a missing parameter -> default, an unknown one is ignored, an out-of-range value is clamped
+            auto xml = juce::parseXML(folder.getChildFile(listed + ".ipmohcpreset"));
+            bool removed = false;
+            for (auto* e : xml->getChildWithTagNameIterator("P"))
+                if (e->getStringAttribute("id") == "cutoff") { xml->removeChildElement(e, true); removed = true; break; }
+            auto* extra = xml->createNewChildElement("P"); extra->setAttribute("id", "no_such_parameter"); extra->setAttribute("v", 3.0);
+            auto* big = xml->createNewChildElement("P"); big->setAttribute("id", "resonance"); big->setAttribute("v", 7.0);
+            check(removed && folder.getChildFile("odd.ipmohcpreset").replaceWithText(xml->toString()), "set-up: a hand-edited preset file");
+            setPlain(*p, "cutoff", 0.1f); setPlain(*p, "resonance", 0.1f);
+            check(p->loadPreset("odd"), "a preset with an unknown parameter loads");
+            check(near(getPlain(*p, "cutoff"), 0.5f), "a parameter the file does not mention goes to its default (cutoff 0.5)");
+            check(near(getPlain(*p, "resonance"), 1.f), "an out-of-range value is clamped to the parameter's range");
+
+            // bad input
+            folder.getChildFile("junk.ipmohcpreset").replaceWithText("this is not xml");
+            folder.getChildFile("other.ipmohcpreset").replaceWithText("<something_else/>");
+            setPlain(*p, "cutoff", 0.31f);
+            check(!p->loadPreset("junk") && !p->loadPreset("other") && !p->loadPreset("does not exist") && !p->loadPreset("") && near(getPlain(*p, "cutoff"), 0.31f),
+                  "a file that is not a preset, a missing file and an empty name all fail without changing anything");
+            juce::String err2;
+            check(!p->savePreset("   ", err2) && err2.isNotEmpty(), "saving without a name fails with a message");
+
+            // INIT
+            setPlain(*p, "table", 5.f); setPlain(*p, "gain", 0.55f);
+            p->loadInitPreset();
+            check(getPlain(*p, "table") == 1.f && near(getPlain(*p, "cutoff"), 0.5f) && near(getPlain(*p, "resonance"), 0.63f) && near(getPlain(*p, "fx"), 0.5f) && near(getPlain(*p, "comp"), 0.f),
+                  "INIT puts the sound settings back to their defaults");
+            check(near(getPlain(*p, "gain"), 0.55f), "...but leaves GAIN alone");
+            check(WT8AudioProcessor::presetParameterIds().size() == 15, "a preset has 15 parameters");
+            // every id in the list is a real parameter (a typo would silently store nothing)
+            bool allReal = true; for (auto& id : WT8AudioProcessor::presetParameterIds()) if (p->apvts.getParameter(id) == nullptr) allReal = false;
+            check(allReal, "every parameter a preset names exists");
+            // the file really is small plain XML
+            check(folder.getChildFile(listed + ".ipmohcpreset").loadFileAsString().contains("<ipmohcPreset"), "the file is readable XML");
+        }
+        folder.deleteRecursively();
+
+        // ---- pattern slots ----
+        {
+            auto p = makeProc();
+            check(p->getPatternSlot() == 0 && !p->patternSlotHasSteps(0), "starts on slot 1, empty");
+            p->sequencer().recordNote(60, 100); p->sequencer().addRest(); p->sequencer().recordNote(67, 90);
+            const auto patA = p->sequencer().serialize();
+            check(p->patternSlotHasSteps(0), "the current slot counts what is in the sequencer");
+            p->selectPatternSlot(4);
+            check(p->getPatternSlot() == 4 && p->sequencer().length() == 0 && p->patternSlotHasSteps(0) && !p->patternSlotHasSteps(4), "slot 5 is empty; slot 1 kept its pattern");
+            p->sequencer().recordNote(72, 100); p->sequencer().recordNote(74, 100);
+            const auto patB = p->sequencer().serialize();
+            p->selectPatternSlot(0);
+            check(p->sequencer().serialize() == patA, "back on slot 1 the first pattern is exactly as it was");
+            p->selectPatternSlot(4);
+            check(p->sequencer().serialize() == patB, "slot 5 has the second one");
+            p->selectPatternSlot(99);
+            check(p->getPatternSlot() == 15, "a slot number past the end is clamped to 16");
+            p->selectPatternSlot(-3);
+            check(p->getPatternSlot() == 0 && p->sequencer().serialize() == patA, "...and one below 1 to slot 1");
+            p->selectPatternSlot(4);
+
+            // saved with the project
+            juce::MemoryBlock saved; p->getStateInformation(saved);
+            auto q = makeProc(); q->setStateInformation(saved.getData(), (int) saved.getSize());
+            check(q->getPatternSlot() == 4 && q->sequencer().serialize() == patB, "reopened project: same slot, same pattern");
+            check(q->patternSlotHasSteps(0) && !q->patternSlotHasSteps(1), "reopened project: slot 1 holds a pattern, slot 2 does not");
+            q->selectPatternSlot(0);
+            check(q->sequencer().serialize() == patA, "reopened project: slot 1 has the first pattern");
+
+            // a project from before v0.8 has just `sequence`: it lands in slot 1 and the others are empty
+            auto xml = juce::AudioProcessor::getXmlFromBinary(saved.getData(), (int) saved.getSize());
+            for (int i = 0; i < 16; ++i) xml->removeAttribute("pat" + juce::String(i));
+            xml->removeAttribute("patCur");
+            xml->setAttribute("sequence", "60:100:75,r,67:80");
+            juce::MemoryBlock old; juce::AudioProcessor::copyXmlToBinary(*xml, old);
+            auto r = makeProc(); r->selectPatternSlot(7); r->sequencer().recordNote(50, 100);
+            r->setStateInformation(old.getData(), (int) old.getSize());
+            check(r->getPatternSlot() == 0 && r->sequencer().serialize() == "60:100:75,r,67:80", "pre-v0.8 project: the pattern is in slot 1");
+            bool othersEmpty = true; for (int i = 1; i < 16; ++i) if (r->patternSlotHasSteps(i)) othersEmpty = false;
+            check(othersEmpty, "pre-v0.8 project: slots 2-16 are empty (the previous session's slots do not leak in)");
+
+            // a slot that is emptied does not come back from a stale saved copy
+            r->selectPatternSlot(2); r->sequencer().recordNote(55, 100); r->selectPatternSlot(0);
+            r->selectPatternSlot(2); r->sequencer().clear(); r->selectPatternSlot(0);
+            juce::MemoryBlock saved2; r->getStateInformation(saved2);
+            auto xml2 = juce::AudioProcessor::getXmlFromBinary(saved2.getData(), (int) saved2.getSize());
+            check(!xml2->hasAttribute("pat2") && xml2->getStringAttribute("sequence") == "60:100:75,r,67:80", "an emptied slot leaves no saved copy; `sequence` is still the current pattern (so older versions can read the project)");
+            // the other settings do not belong to a slot
+            setPlain(*r, "seq_swing", 66.f); r->setSeqTranspose(5); r->selectPatternSlot(3);
+            check(near(getPlain(*r, "seq_swing"), 66.f) && r->getSeqTranspose() == 5, "switching slot leaves swing / direction / transpose alone");
+        }
+        // a slot switch while the sequencer plays: no stuck note, the new pattern is heard, an empty slot is silent
+        {
+            auto p = makeProc();
+            for (int n : {60, 64, 67, 72}) p->sequencer().recordNote(n, 100);
+            p->selectPatternSlot(1); for (int n : {48, 50}) p->sequencer().recordNote(n, 100);
+            p->selectPatternSlot(0);
+            setPlain(*p, "seq_div", 1.f); // 1/8
+            p->apvts.getParameter("seq_play")->setValueNotifyingHost(1.f);
+            juce::AudioBuffer<float> b(2, bs); juce::MidiBuffer none; bool fin = true; float pk = 0;
+            auto runB = [&](int blocks) { pk = 0; for (int blk = 0; blk < blocks; ++blk) { b.clear(); p->processBlock(b, none); for (int i = 0; i < bs; ++i) { const float v = b.getSample(0, i); if (!std::isfinite(v)) fin = false; pk = std::fmax(pk, std::fabs(v)); } } };
+            runB(30); const float sounding = pk;
+            p->selectPatternSlot(1); runB(30); const float sounding2 = pk;
+            p->selectPatternSlot(9); // empty
+            runB(8);  // let the release of the last note and the 4 s tail settle quickly: only check later blocks
+            runB(400); const float afterEmpty = pk;
+            check(fin && sounding > 0.01f && sounding2 > 0.01f, "audio from slot 1 and from slot 2 after switching while playing");
+            check(afterEmpty < 0.01f, "an empty slot is silent (after the release tail)");
+            p->selectPatternSlot(0); runB(30);
+            check(pk > 0.01f, "going back to a slot with a pattern plays again");
+        }
+        printf("v0.8 presets + pattern slots: %s\n", v8Ok ? "ok" : "FAILED");
+    }
+
+    bool ok = seqOk && v4Ok && v5Ok && v6Ok && v8Ok && finite && peak > 0.02f && peak <= 1.5f && held > 0.005f && tail < held * 0.05f && std::fabs(cutoff - 0.2f) < 0.01f;
     printf(ok ? "PASS\n" : "FAIL\n");
     return ok ? 0 : 1;
 }

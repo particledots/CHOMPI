@@ -123,6 +123,14 @@ class WT8Editor : public juce::AudioProcessorEditor, private juce::Timer
         juce::Rectangle<int> bounds; // filled in by resized()
     };
 
+    // v0.8: presets (sound settings as files, chosen from the header) and pattern slots (row C)
+    void refreshPresetList(const juce::String& select);
+    void stepPreset(int dir);
+    void promptSavePreset();
+    void savePresetAs(const juce::String& name);
+    void refreshPatternBox();
+    void stepPatternSlot(int dir);
+
     Knob& addKnob(const juce::String& paramId, const juce::String& label, Kind kind, bool bipolar = false);
     void addGroup(const juce::String& title, std::initializer_list<Knob*> knobs);
 
@@ -139,6 +147,12 @@ class WT8Editor : public juce::AudioProcessorEditor, private juce::Timer
                      accentLaneBtn_{"ACCENT"}, octLaneBtn_{"OCT"}, condLaneBtn_{"COND"}, pendBtn_{"ENDS x2"};
     juce::TextButton gridViewBtn_{"GRID"}, ringViewBtn_{"RING"}, twoRingsViewBtn_{"2 RINGS"}; // v0.7: which view the steps are shown in (editor state only, not saved)
     juce::TextButton xposeBtn_{"MIDI XPOSE"}, xposeResetBtn_{"RESET"};
+    // v0.8
+    juce::ComboBox presetBox_, patBox_;
+    juce::TextButton presetPrevBtn_{"<"}, presetNextBtn_{">"}, presetSaveBtn_{"SAVE"}, presetFolderBtn_{"FOLDER"}, patPrevBtn_{"<"}, patNextBtn_{">"};
+    juce::Label patLabel_;
+    juce::StringArray presetNames_;   // the files in the preset folder; combo item id = index + 2 (id 1 = INIT)
+    juce::StringArray patTexts_;      // what the PATTERN box currently shows for each slot, so it is only touched when something changed
     juce::ComboBox syncBox_, divBox_, dirBox_, scaleBox_, rootBox_, octBox_;
     juce::Label syncLabel_, divLabel_, laneLabel_, dirLabel_, scaleLabel_, rootLabel_, octLabel_, xposeReadout_;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> playAtt_, muteAtt_, pendAtt_, xposeAtt_;
