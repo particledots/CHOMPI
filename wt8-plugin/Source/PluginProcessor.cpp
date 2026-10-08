@@ -1,6 +1,8 @@
 #include "PluginProcessor.h"
 #include "WT8Engine.h"
 #include "PluginEditor.h"
+#include "StarterPresets.h"
+#include <cmath>
 #include <limits>
 #include <BinaryData.h>
 
@@ -290,6 +292,13 @@ void WT8AudioProcessor::setStateInformation(const void* data, int sizeInBytes)
                     slots_[i] = i == slotCur_ ? std::string() : apvts.state.getProperty(juce::Identifier("pat" + juce::String(i))).toString().toStdString();
             }
             setSeqTranspose((int) apvts.state.getProperty("transpose", 0)); // states saved before v0.5 have none: 0
+            {
+                // v0.9: the sound came back with the project, not from a preset, so no preset is current any more
+                const juce::ScopedLock sl(presetLock_);
+                presetKind_ = PresetKind::None;
+                presetName_ = juce::String();
+                presetBaseline_.clear();
+            }
             seq_.resetTransport();
             // Never start playing on its own just because a project was opened
             if (auto* play = apvts.getParameter("seq_play")) play->setValueNotifyingHost(0.f);
@@ -322,6 +331,21 @@ void WT8AudioProcessor::selectPatternSlot(int slot)
     seq_.restart();
 }
 
+bool WT8AudioProcessor::copyPatternSlot(int from, int to)
+{
+    if (from < 0 || from >= kPatternSlots || to < 0 || to >= kPatternSlots || from == to) return false;
+    const juce::ScopedLock sl(slotLock_);
+    const std::string text = from == slotCur_ ? seq_.serialize() : slots_[from]; // the current slot's truth is the live pattern
+    if (to == slotCur_)
+    {
+        seq_.deserialize(text); // same swap as selecting a slot: the audio thread just plays the new steps
+        seq_.restart();
+    }
+    else
+        slots_[to] = text;
+    return true;
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // v0.8 presets
 const juce::StringArray& WT8AudioProcessor::presetParameterIds()
@@ -349,6 +373,11 @@ juce::String WT8AudioProcessor::presetFileName(const juce::String& name)
     return legal.isEmpty() ? juce::String() : legal + ".ipmohcpreset";
 }
 
+juce::String WT8AudioProcessor::presetStem(const juce::String& name)
+{
+    return presetFileName(name).upToLastOccurrenceOf(".ipmohcpreset", false, false);
+}
+
 juce::StringArray WT8AudioProcessor::listPresets() const
 {
     juce::StringArray names;
@@ -367,7 +396,7 @@ bool WT8AudioProcessor::savePreset(const juce::String& name, juce::String& error
 
     juce::XmlElement xml("ipmohcPreset");
     xml.setAttribute("version", 1);
-    xml.setAttribute("name", fileName.upToLastOccurrenceOf(".ipmohcpreset", false, false));
+    xml.setAttribute("name", presetStem(name));
     for (const auto& id : presetParameterIds())
         if (auto* p = apvts.getParameter(id))
         {
@@ -380,6 +409,7 @@ bool WT8AudioProcessor::savePreset(const juce::String& name, juce::String& error
         error = "Could not write the file:\n" + folder.getChildFile(fileName).getFullPathName();
         return false;
     }
+    markPresetCurrent(PresetKind::User, presetStem(name)); // the sound now equals this preset
     return true;
 }
 
@@ -406,12 +436,89 @@ bool WT8AudioProcessor::loadPreset(const juce::String& name)
     for (auto* e : xml->getChildWithTagNameIterator("P"))
         if (e->hasAttribute("id") && e->hasAttribute("v")) values[e->getStringAttribute("id")] = (float) e->getDoubleAttribute("v");
     applyPresetValues(values); // (a name or value this version does not know is ignored; one the file lacks gets its default)
+    markPresetCurrent(PresetKind::User, presetStem(name));
     return true;
 }
 
 void WT8AudioProcessor::loadInitPreset()
 {
     applyPresetValues({});
+    markPresetCurrent(PresetKind::Init, juce::String());
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// v0.9 starter presets and the "modified" check
+int WT8AudioProcessor::numStarterPresets() { return starter::kCount; }
+
+juce::String WT8AudioProcessor::starterPresetName(int index)
+{
+    return "Starter " + juce::String(index + 1).paddedLeft('0', 2);
+}
+
+bool WT8AudioProcessor::loadStarterPreset(int index)
+{
+    if (index < 0 || index >= starter::kCount) return false;
+    const int* r = starter::kRows[index];
+    auto k = [](int v) { return (float) v * 0.001f; };
+    std::map<juce::String, float> values;
+    values["table"]          = (float) (r[2] + 1);   // the firmware counts tables from 0, the plugin's WAVETABLE knob from 1
+    values["cycle"]          = (float) r[1];
+    // the firmware's pitch knob is a stepped +/- 12 semitones around 0.5; round to the step (see StarterPresets.h)
+    values["pitch"]          = (float) juce::jlimit(-12, 12, juce::roundToInt((k(r[0]) - 0.5f) * 24.0f));
+    values["attack"]         = k(r[3]);
+    values["pitchlfodepth"]  = k(r[4]);
+    values["release"]        = k(r[5]);
+    values["filterlfodepth"] = k(r[6]);
+    values["cutoff"]         = k(r[7]);
+    values["pitchlforate"]   = k(r[8]);
+    values["fx"]             = k(r[9]);
+    values["resonance"]      = k(r[10]);
+    values["filterlforate"]  = k(r[11]);
+    values["fxtime"]         = k(r[12]);
+    // "octave" and "comp" are not in a firmware preset: left out, so applyPresetValues() puts them at their defaults
+    applyPresetValues(values);
+    markPresetCurrent(PresetKind::Starter, starterPresetName(index));
+    return true;
+}
+
+void WT8AudioProcessor::markPresetCurrent(PresetKind kind, const juce::String& name)
+{
+    const auto& ids = presetParameterIds();
+    std::vector<float> base;
+    base.reserve((size_t) ids.size());
+    for (const auto& id : ids)
+    {
+        auto* p = apvts.getParameter(id);
+        base.push_back(p != nullptr ? p->getValue() : 0.f);
+    }
+    const juce::ScopedLock sl(presetLock_);
+    presetKind_ = kind;
+    presetName_ = name;
+    presetBaseline_ = std::move(base);
+}
+
+WT8AudioProcessor::PresetKind WT8AudioProcessor::getCurrentPresetKind() const
+{
+    const juce::ScopedLock sl(presetLock_);
+    return presetKind_;
+}
+
+juce::String WT8AudioProcessor::getCurrentPresetName() const
+{
+    const juce::ScopedLock sl(presetLock_);
+    return presetName_;
+}
+
+bool WT8AudioProcessor::isPresetModified() const
+{
+    const juce::ScopedLock sl(presetLock_);
+    if (presetKind_ == PresetKind::None) return false;
+    const auto& ids = presetParameterIds();
+    for (int i = 0; i < ids.size() && i < (int) presetBaseline_.size(); ++i)
+        if (auto* p = apvts.getParameter(ids[i]))
+            if (std::abs(p->getValue() - presetBaseline_[(size_t) i]) > 5.0e-4f) // (smaller than any step a knob or the host can make)
+                return true;
+    return false;
 }
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()

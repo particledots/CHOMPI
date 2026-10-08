@@ -41,6 +41,7 @@ IpmohcLookAndFeel::IpmohcLookAndFeel()
     setColour(juce::PopupMenu::textColourId, kText);
     setColour(juce::PopupMenu::highlightedBackgroundColourId, kAccent);
     setColour(juce::PopupMenu::highlightedTextColourId, kBg);
+    setColour(juce::PopupMenu::headerTextColourId, kAccent); // v0.9: the STARTER / USER headings in the preset list
 }
 
 juce::Font IpmohcLookAndFeel::getTextButtonFont(juce::TextButton&, int h) { return makeFont(juce::jmax(9.0f, h * 0.42f), true); }
@@ -823,44 +824,60 @@ WT8Editor::WT8Editor(WT8AudioProcessor& p) : juce::AudioProcessorEditor(&p), pro
     rootLabel_.setText("ROOT", juce::dontSendNotification);
     octLabel_.setText("OCT JUMP", juce::dontSendNotification);
 
-    // v0.8 pattern slots (row C): 16 patterns kept inside the project; choosing one plays it from now on
+    // v0.9 pattern slots (row E): 16 patterns kept inside the project. A click on a slot button plays that slot from now on;
+    // COPY, then a click on another slot, copies the current pattern into it (and asks first if that slot already holds one).
     addAndMakeVisible(patLabel_);
     patLabel_.setText("PATTERN", juce::dontSendNotification);
     patLabel_.setJustificationType(juce::Justification::centredRight);
     patLabel_.setColour(juce::Label::textColourId, kDim);
     patLabel_.getProperties().set("fontHeight", 11.0f);
     patLabel_.setInterceptsMouseClicks(false, false);
-    for (int i = 0; i < WT8AudioProcessor::kPatternSlots; ++i) { patBox_.addItem(juce::String(i + 1), i + 1); patTexts_.add(juce::String(i + 1)); }
-    addAndMakeVisible(patBox_);
-    addAndMakeVisible(patPrevBtn_);
-    addAndMakeVisible(patNextBtn_);
-    patBox_.onChange = [this] { proc_.selectPatternSlot(patBox_.getSelectedId() - 1); grid_.refresh(); };
-    patPrevBtn_.onClick = [this] { stepPatternSlot(-1); };
-    patNextBtn_.onClick = [this] { stepPatternSlot(+1); };
-    refreshPatternBox();
+    for (int i = 0; i < WT8AudioProcessor::kPatternSlots; ++i)
+    {
+        slotBtn_[i].setButtonText(juce::String(i + 1));
+        slotBtn_[i].onClick = [this, i] { onSlotClicked(i); };
+        addAndMakeVisible(slotBtn_[i]);
+    }
+    addAndMakeVisible(copyBtn_);
+    copyBtn_.onClick = [this] { setCopyMode(copyBtn_.getToggleState()); };
+    copyBtn_.setClickingTogglesState(true);
+    refreshSlotButtons();
 
-    // v0.8 presets (header): the sound settings as files in a folder, so every project can use them
+    // presets (header): the sound settings - INIT, the starter presets built into the plugin, and the files in the preset folder,
+    // so every project can use them
     for (auto* b : {&presetPrevBtn_, &presetNextBtn_, &presetSaveBtn_, &presetFolderBtn_}) addAndMakeVisible(*b);
     addAndMakeVisible(presetBox_);
     presetBox_.setTextWhenNothingSelected("PRESET");
+    presetBox_.onOpen = [this] { presetBox_.setSelectedId(0, juce::dontSendNotification); boxSetId_ = 0; }; // see PresetCombo
     presetBox_.onChange = [this] {
         const int id = presetBox_.getSelectedId();
-        if (id == 1) proc_.loadInitPreset();
-        else if (id >= 2 && id - 2 < presetNames_.size() && !proc_.loadPreset(presetNames_[id - 2]))
-            presetBox_.setText("(could not load)", juce::dontSendNotification);
+        boxSetId_ = id; // the pick is being handled now: refreshPresetBox() may update the box again
+        bool ok = true;
+        juce::String name;
+        if (id == kInitId) proc_.loadInitPreset();
+        else if (id >= kStarterId0 && id < kStarterId0 + WT8AudioProcessor::numStarterPresets()) ok = proc_.loadStarterPreset(id - kStarterId0);
+        else if (id >= kUserId0 && id - kUserId0 < presetNames_.size()) { name = presetNames_[id - kUserId0]; ok = proc_.loadPreset(name); }
+        else return;
+        if (!ok)
+        {
+            // nothing changed (the previous preset and the sound are still as they were): say so; the box shows the previous one again below
+            juce::AlertWindow::showAsync(juce::MessageBoxOptions::makeOptionsOk(juce::MessageBoxIconType::NoIcon, "PRESET",
+                                         "Could not load the preset \"" + name + "\". The file may have been moved or edited.", "OK", this), nullptr);
+        }
+        refreshPresetBox();
     };
     presetPrevBtn_.onClick = [this] { stepPreset(-1); };
     presetNextBtn_.onClick = [this] { stepPreset(+1); };
     presetSaveBtn_.onClick = [this] { promptSavePreset(); };
     presetFolderBtn_.onClick = [this] { auto f = proc_.getPresetFolder(); f.createDirectory(); f.revealToUser(); };
-    refreshPresetList({});
+    refreshPresetList();
 
     addAndMakeVisible(grid_);
 
     setResizable(true, true);
-    setResizeLimits(630, 647, 1260, 1293); // v0.7: 840 x 862 (was 840 x 762) to give the ring room
-    getConstrainer()->setFixedAspectRatio(840.0 / 862.0);
-    setSize(840, 862);
+    setResizeLimits(630, 674, 1260, 1347); // v0.9: 840 x 898 (was 840 x 862 in v0.7 / v0.8): one more row, for the 16 pattern-slot buttons
+    getConstrainer()->setFixedAspectRatio(840.0 / 898.0);
+    setSize(840, 898);
     grid_.refresh();
     timerCallback(); // fill in the transpose readout and scale state straight away
     startTimerHz(15);
@@ -873,7 +890,8 @@ void WT8Editor::timerCallback()
     playBtn_.setEnabled(syncBox_.getSelectedItemIndex() == 0); // in "Logic" sync, Logic's transport is the play button
     pendBtn_.setEnabled(dirBox_.getSelectedItemIndex() == 2);  // end-repeat only applies to the pendulum
 
-    refreshPatternBox();
+    refreshSlotButtons();
+    refreshPresetBox(); // the "modified" marker follows the knobs (and the host's automation)
     grid_.setGlobalGate(*proc_.apvts.getRawParameterValue("seq_gate")); // the GATE lane shows this for steps without their own gate
     grid_.setLoopLength(juce::roundToInt(proc_.apvts.getRawParameterValue("seq_loop")->load())); // the ring view dims the steps beyond the loop
 
@@ -887,55 +905,162 @@ void WT8Editor::timerCallback()
     xposeReadout_.setColour(juce::Label::textColourId, xposeOn ? kAccent : kDim);
 }
 
-void WT8Editor::refreshPatternBox()
+// ---- v0.9 pattern slots --------------------------------------------------------------------------------------------
+void SlotButton::paintButton(juce::Graphics& g, bool over, bool down)
 {
-    // "3 *" = the slot holds a pattern. Item texts are only rewritten when something changed.
-    bool changed = false;
+    juce::TextButton::paintButton(g, over, down);
+    if (filled) // a small dot under the number: this slot holds a pattern
+    {
+        const float r = juce::jmax(1.5f, getHeight() * 0.075f);
+        g.setColour(getToggleState() ? kBg : kAccent);
+        g.fillEllipse(getWidth() * 0.5f - r, getHeight() - r * 3.0f, r * 2.0f, r * 2.0f);
+    }
+}
+
+void WT8Editor::refreshSlotButtons()
+{
+    const int cur = proc_.getPatternSlot();
     for (int i = 0; i < WT8AudioProcessor::kPatternSlots; ++i)
     {
-        const auto text = juce::String(i + 1) + (proc_.patternSlotHasSteps(i) ? " *" : "");
-        if (text != patTexts_[i]) { patTexts_.set(i, text); patBox_.changeItemText(i + 1, text); changed = true; }
+        const bool filled = proc_.patternSlotHasSteps(i);
+        if (slotBtn_[i].filled != filled) { slotBtn_[i].filled = filled; slotBtn_[i].repaint(); }
+        if (slotBtn_[i].getToggleState() != (i == cur)) slotBtn_[i].setToggleState(i == cur, juce::dontSendNotification);
     }
-    const int want = proc_.getPatternSlot() + 1;
-    if (changed || patBox_.getSelectedId() != want) patBox_.setSelectedId(want, juce::dontSendNotification);
+    // an empty pattern has nothing to copy; if it became empty while COPY was armed (CLEAR), the arming is dropped
+    const bool canCopy = proc_.patternSlotHasSteps(cur);
+    if (copyBtn_.isEnabled() != canCopy) copyBtn_.setEnabled(canCopy);
+    if (!canCopy && copyBtn_.getToggleState()) setCopyMode(false);
+    if (copyBtn_.getToggleState()) patLabel_.setText("COPY " + juce::String(cur + 1) + " TO", juce::dontSendNotification);
 }
 
-void WT8Editor::stepPatternSlot(int dir)
+void WT8Editor::setCopyMode(bool on)
 {
-    const int n = WT8AudioProcessor::kPatternSlots;
-    patBox_.setSelectedId((proc_.getPatternSlot() + dir + n) % n + 1, juce::sendNotificationSync);
+    copyBtn_.setToggleState(on, juce::dontSendNotification);
+    copyBtn_.setButtonText(on ? "CANCEL" : "COPY");
+    patLabel_.setText(on ? "COPY " + juce::String(proc_.getPatternSlot() + 1) + " TO" : juce::String("PATTERN"), juce::dontSendNotification);
 }
 
-void WT8Editor::refreshPresetList(const juce::String& select)
+void WT8Editor::onSlotClicked(int slot)
+{
+    if (copyBtn_.getToggleState())
+    {
+        if (slot == proc_.getPatternSlot()) setCopyMode(false); // "copy to itself": just leave COPY
+        else copyCurrentSlotTo(slot);
+        return;
+    }
+    proc_.selectPatternSlot(slot);
+    grid_.refresh();
+    refreshSlotButtons();
+}
+
+void WT8Editor::copyCurrentSlotTo(int target)
+{
+    const int from = proc_.getPatternSlot();
+    auto doCopy = [this, from, target] {
+        proc_.copyPatternSlot(from, target); // the current slot keeps playing; the copy waits in the target slot
+        setCopyMode(false);
+        refreshSlotButtons();
+    };
+    if (!proc_.patternSlotHasSteps(target)) { doCopy(); return; }
+    juce::Component::SafePointer<WT8Editor> self(this);
+    juce::AlertWindow::showAsync(juce::MessageBoxOptions::makeOptionsOkCancel(
+                                     juce::MessageBoxIconType::NoIcon, "REPLACE PATTERN?",
+                                     "Pattern " + juce::String(target + 1) + " already holds a pattern. Replace it with a copy of pattern " + juce::String(from + 1) + "?",
+                                     "REPLACE", "CANCEL", this),
+                                 juce::ModalCallbackFunction::create([self, doCopy](int r) {
+                                     if (self == nullptr) return;
+                                     if (r == 1) doCopy(); else self->setCopyMode(false);
+                                 }));
+}
+
+// ---- presets ----------------------------------------------------------------------------------------------------------
+juce::String WT8Editor::presetItemText(int id) const
+{
+    if (id == kInitId) return "INIT (defaults)";
+    if (id >= kStarterId0 && id < kStarterId0 + WT8AudioProcessor::numStarterPresets()) return WT8AudioProcessor::starterPresetName(id - kStarterId0);
+    if (id >= kUserId0 && id - kUserId0 < presetNames_.size()) return presetNames_[id - kUserId0];
+    return {};
+}
+
+void WT8Editor::refreshPresetList()
 {
     presetNames_ = proc_.listPresets();
     presetBox_.clear(juce::dontSendNotification);
-    presetBox_.addItem("INIT (defaults)", 1);
+    boxSetId_ = 0; // (clear() left nothing selected)
+    presetIds_.clear();
+    presetBox_.addItem(presetItemText(kInitId), kInitId);
+    presetIds_.push_back(kInitId);
     presetBox_.addSeparator();
-    for (int i = 0; i < presetNames_.size(); ++i) presetBox_.addItem(presetNames_[i], i + 2);
-    if (select.isNotEmpty())
+    presetBox_.addSectionHeading("STARTER");
+    for (int i = 0; i < WT8AudioProcessor::numStarterPresets(); ++i)
     {
-        const int idx = presetNames_.indexOf(select);
-        if (idx >= 0) presetBox_.setSelectedId(idx + 2, juce::dontSendNotification);
+        presetBox_.addItem(presetItemText(kStarterId0 + i), kStarterId0 + i);
+        presetIds_.push_back(kStarterId0 + i);
     }
+    if (presetNames_.size() > 0)
+    {
+        presetBox_.addSeparator();
+        presetBox_.addSectionHeading("USER");
+        for (int i = 0; i < presetNames_.size(); ++i)
+        {
+            presetBox_.addItem(presetItemText(kUserId0 + i), kUserId0 + i);
+            presetIds_.push_back(kUserId0 + i);
+        }
+    }
+    shownPresetId_ = -1; // the items were rebuilt: show the selection and marker again
+    refreshPresetBox();
+}
+
+void WT8Editor::refreshPresetBox()
+{
+    if (presetBox_.isPopupActive()) return; // the list is open (PresetCombo cleared the selection on purpose): leave it alone
+    if (presetBox_.getSelectedId() != boxSetId_) return; // the user has just picked an item: its onChange is on its way and refreshes the box itself
+    // Which item the processor says is current (0 = none: a fresh editor, or after a project was loaded)
+    int wantId = 0;
+    switch (proc_.getCurrentPresetKind())
+    {
+        case WT8AudioProcessor::PresetKind::None: break;
+        case WT8AudioProcessor::PresetKind::Init: wantId = kInitId; break;
+        case WT8AudioProcessor::PresetKind::Starter:
+            for (int i = 0; i < WT8AudioProcessor::numStarterPresets(); ++i)
+                if (WT8AudioProcessor::starterPresetName(i) == proc_.getCurrentPresetName()) wantId = kStarterId0 + i;
+            break;
+        case WT8AudioProcessor::PresetKind::User:
+        {
+            const int idx = presetNames_.indexOf(proc_.getCurrentPresetName(), true); // (file names are not case sensitive on the Mac)
+            if (idx >= 0) wantId = kUserId0 + idx; // a file that was removed from the folder meanwhile: nothing is shown
+            break;
+        }
+    }
+    const bool modified = wantId != 0 && proc_.isPresetModified();
+    if (wantId == shownPresetId_ && modified == shownModified_ && presetBox_.getSelectedId() == wantId) return;
+
+    // "* name" in amber = the sound has been changed since this preset was loaded (the marker leads, so a long name cannot cut it off)
+    if (shownPresetId_ > 0 && shownModified_) presetBox_.changeItemText(shownPresetId_, presetItemText(shownPresetId_));
+    shownPresetId_ = wantId;
+    shownModified_ = modified;
+    if (wantId != 0) presetBox_.changeItemText(wantId, (modified ? "* " : "") + presetItemText(wantId));
+    presetBox_.setSelectedId(wantId, juce::dontSendNotification); // (0 shows "PRESET"; the call also refreshes the shown text)
+    boxSetId_ = wantId;
+    presetBox_.setColour(juce::ComboBox::textColourId, modified ? kAccent : kText);
 }
 
 void WT8Editor::stepPreset(int dir)
 {
-    presetNames_ = proc_.listPresets(); // (new files may have been added in the folder)
-    const int count = presetNames_.size() + 1; // + INIT
-    const int cur = presetBox_.getSelectedId() > 0 ? presetBox_.getSelectedId() - 1 : (dir > 0 ? -1 : 0);
-    const auto keep = presetBox_.getSelectedId() >= 2 && presetBox_.getSelectedId() - 2 < presetNames_.size() ? presetNames_[presetBox_.getSelectedId() - 2] : juce::String();
-    refreshPresetList(keep);
-    presetBox_.setSelectedId(((cur + dir) % count + count) % count + 1, juce::sendNotificationSync);
+    refreshPresetList(); // (new files may have been added in the folder)
+    const int n = (int) presetIds_.size();
+    int cur = -1;
+    for (int i = 0; i < n; ++i) if (presetIds_[(size_t) i] == presetBox_.getSelectedId()) cur = i;
+    const int next = cur < 0 ? (dir > 0 ? 0 : n - 1) : ((cur + dir) % n + n) % n; // nothing shown yet: > goes to INIT, < to the last one
+    presetBox_.setSelectedId(presetIds_[(size_t) next], juce::sendNotificationSync);
 }
 
 void WT8Editor::promptSavePreset()
 {
     auto* w = new juce::AlertWindow("SAVE PRESET", "Name for this sound (the filter, oscillator, envelope, LFO and effect settings):",
                                     juce::MessageBoxIconType::NoIcon, this);
-    const int id = presetBox_.getSelectedId();
-    w->addTextEditor("name", id >= 2 && id - 2 < presetNames_.size() ? presetNames_[id - 2] : juce::String());
+    // suggest the name of the user preset that is current (saving then replaces it); for INIT / a starter preset the field starts empty
+    w->addTextEditor("name", proc_.getCurrentPresetKind() == WT8AudioProcessor::PresetKind::User ? proc_.getCurrentPresetName() : juce::String());
     w->addButton("SAVE", 1, juce::KeyPress(juce::KeyPress::returnKey));
     w->addButton("CANCEL", 0, juce::KeyPress(juce::KeyPress::escapeKey));
     juce::Component::SafePointer<WT8Editor> self(this);
@@ -961,10 +1086,9 @@ void WT8Editor::savePresetAs(const juce::String& rawName)
             juce::AlertWindow::showAsync(juce::MessageBoxOptions::makeOptionsOk(juce::MessageBoxIconType::NoIcon, "PRESET", err, "OK", this), nullptr);
             return;
         }
-        const auto stem = WT8AudioProcessor::presetFileName(n).upToLastOccurrenceOf(".ipmohcpreset", false, false);
-        refreshPresetList(stem);
+        refreshPresetList(); // the saved preset is now the current one (the processor says so), so the box selects it
     };
-    if (proc_.listPresets().contains(WT8AudioProcessor::presetFileName(name).upToLastOccurrenceOf(".ipmohcpreset", false, false), true))
+    if (proc_.listPresets().contains(WT8AudioProcessor::presetStem(name), true))
     {
         juce::Component::SafePointer<WT8Editor> self(this);
         juce::AlertWindow::showAsync(juce::MessageBoxOptions::makeOptionsOkCancel(juce::MessageBoxIconType::NoIcon, "REPLACE PRESET?",
@@ -1121,8 +1245,6 @@ void WT8Editor::resized()
     put(xposeBtn_, 82); put(xposeReadout_, 52); put(xposeResetBtn_, 52);
     controls.removeFromLeft(int(14 * scale));
     put(octLabel_, 62); put(octBox_, 140);
-    controls.removeFromLeft(int(2 * scale));
-    put(patLabel_, 46); put(patPrevBtn_, 22); put(patBox_, 62); put(patNextBtn_, 22);
 
     // row D: which per-step value the grid shows and edits
     inner.removeFromTop(int(6 * scale));
@@ -1131,6 +1253,14 @@ void WT8Editor::resized()
     put(accentLaneBtn_, 60); put(octLaneBtn_, 40); put(condLaneBtn_, 50);
     controls.removeFromLeft(int(10 * scale));
     put(gridViewBtn_, 46); put(ringViewBtn_, 48); put(twoRingsViewBtn_, 64);
+
+    // row E (v0.9): the 16 pattern slots, and COPY
+    inner.removeFromTop(int(6 * scale));
+    controls = inner.removeFromTop(int(30 * scale));
+    put(patLabel_, 66);
+    for (auto& b : slotBtn_) { b.setBounds(controls.removeFromLeft(int(28 * scale))); controls.removeFromLeft(int(2 * scale)); }
+    controls.removeFromLeft(int(4 * scale));
+    put(copyBtn_, 56);
 
     inner.removeFromTop(int(6 * scale));
     grid_.setBounds(inner);

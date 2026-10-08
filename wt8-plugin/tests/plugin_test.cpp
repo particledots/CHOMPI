@@ -607,7 +607,238 @@ int main()
         printf("v0.8 presets + pattern slots: %s\n", v8Ok ? "ok" : "FAILED");
     }
 
-    bool ok = seqOk && v4Ok && v5Ok && v6Ok && v8Ok && finite && peak > 0.02f && peak <= 1.5f && held > 0.005f && tail < held * 0.05f && std::fabs(cutoff - 0.2f) < 0.01f;
+    // ---- v0.9: copy a pattern slot, starter presets, and the "modified" marker (which preset is current, has the sound changed) ----
+    bool v9Ok = true;
+    {
+        auto setPlain = [](WT8AudioProcessor& pr, const char* id, float plain) {
+            auto* p = dynamic_cast<juce::RangedAudioParameter*>(pr.apvts.getParameter(id));
+            p->setValueNotifyingHost(p->convertTo0to1(plain));
+        };
+        auto getPlain = [](WT8AudioProcessor& pr, const char* id) { return (float) *pr.apvts.getRawParameterValue(id); };
+        auto check = [&](bool cond, const char* what) { printf("  %s: %s\n", cond ? "ok  " : "FAIL", what); v9Ok = v9Ok && cond; };
+        auto makeProc = [&]() {
+            auto pr = std::make_unique<WT8AudioProcessor>();
+            pr->setPlayConfigDetails(0, 2, sr, bs); pr->prepareToPlay(sr, bs);
+            return pr;
+        };
+        auto near = [](float a, float b) { return std::fabs(a - b) < 1e-3f; };
+
+        // ---- copy a pattern slot ----
+        {
+            auto p = makeProc();
+            auto& sq = p->sequencer();
+            for (int n : {60, 64, 67, 72}) sq.recordNote(n, 100);
+            sq.setProb(1, 70); sq.setRatchet(2, 3); sq.setStepGate(0, 50); sq.toggleAccent(3); sq.setOctChance(1, 30); sq.setCondition(2, 2, 3);
+            const auto patA = sq.serialize();
+            check(patA.find("x3") != std::string::npos && patA.find("c2/3") != std::string::npos, "set-up: a pattern that uses the per-step values");
+
+            check(p->copyPatternSlot(0, 6), "copy slot 1 to slot 7");
+            check(p->patternSlotHasSteps(6) && sq.serialize() == patA && p->getPatternSlot() == 0, "slot 7 now holds a pattern; slot 1 is still current and untouched");
+            p->selectPatternSlot(6);
+            check(sq.serialize() == patA, "slot 7 holds exactly the same pattern, with every per-step value");
+            sq.recordNote(50, 100);
+            p->selectPatternSlot(0);
+            check(sq.serialize() == patA, "editing the copy does not change the original");
+
+            // copy over a slot that holds something: it is replaced
+            p->selectPatternSlot(3); sq.recordNote(40, 100); sq.recordNote(41, 100); p->selectPatternSlot(0);
+            check(p->copyPatternSlot(0, 3), "copy onto a slot that holds a pattern");
+            p->selectPatternSlot(3);
+            check(sq.serialize() == patA, "...it replaced what was there");
+            p->selectPatternSlot(0);
+
+            // copy between two slots that are not the current one
+            p->selectPatternSlot(6); const auto patA2 = sq.serialize(); p->selectPatternSlot(0);
+            check(p->copyPatternSlot(6, 9) && p->getPatternSlot() == 0 && sq.serialize() == patA, "copy slot 7 to slot 10 while slot 1 is current: slot 1 untouched");
+            p->selectPatternSlot(9); check(sq.serialize() == patA2, "slot 10 has slot 7's pattern"); p->selectPatternSlot(0);
+
+            // copy into the current slot from another one
+            p->selectPatternSlot(5); sq.recordNote(30, 90); const auto patC = sq.serialize(); p->selectPatternSlot(0);
+            check(p->copyPatternSlot(5, 0) && p->getPatternSlot() == 0 && sq.serialize() == patC, "copy into the current slot: the sequencer has the copy");
+            p->selectPatternSlot(5); check(sq.serialize() == patC, "...and the source slot still has its pattern"); p->selectPatternSlot(0);
+
+            // refusals change nothing
+            const auto before = sq.serialize();
+            check(!p->copyPatternSlot(0, 0) && !p->copyPatternSlot(-1, 2) && !p->copyPatternSlot(2, 16) && !p->copyPatternSlot(99, 0) && !p->copyPatternSlot(0, -4),
+                  "copying a slot onto itself, or from / to a slot that does not exist, is refused");
+            check(sq.serialize() == before && p->getPatternSlot() == 0, "...and changes nothing");
+
+            // copying an empty slot gives an empty slot
+            check(!p->patternSlotHasSteps(12) && p->copyPatternSlot(12, 3) && !p->patternSlotHasSteps(3), "copying an empty slot leaves an empty slot");
+
+            // saved with the project
+            p->selectPatternSlot(0); sq.clear(); for (int n : {60, 64}) sq.recordNote(n, 100);
+            const auto patD = sq.serialize();
+            p->copyPatternSlot(0, 14);
+            juce::MemoryBlock saved; p->getStateInformation(saved);
+            auto q = makeProc(); q->setStateInformation(saved.getData(), (int) saved.getSize());
+            q->selectPatternSlot(14);
+            check(q->sequencer().serialize() == patD, "a copied slot comes back after saving and reopening the project");
+        }
+        // copying while the sequencer plays: no stuck note, no break in the sound
+        {
+            auto p = makeProc();
+            for (int n : {60, 64, 67, 72}) p->sequencer().recordNote(n, 100);
+            setPlain(*p, "seq_div", 1.f);
+            p->apvts.getParameter("seq_play")->setValueNotifyingHost(1.f);
+            juce::AudioBuffer<float> b(2, bs); juce::MidiBuffer none; bool fin = true; float pk = 0;
+            auto runB = [&](int blocks) { pk = 0; for (int blk = 0; blk < blocks; ++blk) { b.clear(); p->processBlock(b, none); for (int i = 0; i < bs; ++i) { const float v = b.getSample(0, i); if (!std::isfinite(v)) fin = false; pk = std::fmax(pk, std::fabs(v)); } } };
+            runB(30); const float before = pk;
+            p->copyPatternSlot(0, 8); runB(30); const float afterCopyAway = pk;
+            p->selectPatternSlot(8); p->sequencer().recordNote(50, 100); p->selectPatternSlot(0);
+            p->copyPatternSlot(8, 0); runB(30); const float afterCopyIn = pk;
+            check(fin && before > 0.01f && afterCopyAway > 0.01f && afterCopyIn > 0.01f, "copy to another slot, and copy into the playing slot, while playing: still sounding, all finite");
+            p->apvts.getParameter("seq_play")->setValueNotifyingHost(0.f); runB(8); runB(400);
+            check(pk < 0.01f, "...and silent after stopping (no stuck note)");
+        }
+
+        // ---- starter presets ----
+        check(WT8AudioProcessor::numStarterPresets() == 14, "14 starter presets");
+        {
+            bool names = true;
+            for (int i = 0; i < 14; ++i) names = names && WT8AudioProcessor::starterPresetName(i) == "Starter " + juce::String(i + 1).paddedLeft('0', 2);
+            check(names && WT8AudioProcessor::starterPresetName(0) == "Starter 01" && WT8AudioProcessor::starterPresetName(13) == "Starter 14", "named Starter 01 .. Starter 14");
+        }
+        {
+            // Cross-check the compiled-in table against the firmware's own presets.json, converted here a second way
+            // (CI runs the tests from the repository root; if the file is not found from where this runs the check is skipped, loudly).
+            juce::File json;
+            for (const char* rel : {"firmware/card-profiles/wave-1.0/presets.json", "../firmware/card-profiles/wave-1.0/presets.json", "../../firmware/card-profiles/wave-1.0/presets.json"})
+            {
+                const auto f = juce::File::getCurrentWorkingDirectory().getChildFile(rel);
+                if (f.existsAsFile()) { json = f; break; }
+            }
+            if (json == juce::File())
+                printf("  SKIP: firmware/card-profiles/wave-1.0/presets.json not found from the current directory - starter table NOT cross-checked\n");
+            else
+            {
+                const auto root = juce::JSON::parse(json);
+                auto* rows = root.getArray();
+                check(rows != nullptr && rows->size() == 15 && (int) rows->getLast() == 3, "the firmware preset file has 14 slots and format version 3 (as the table was made from)");
+                bool all = rows != nullptr && rows->size() == 15;
+                for (int i = 0; all && i < 14; ++i)
+                {
+                    auto* r = (*rows)[i].getArray();
+                    if (r == nullptr || r->size() != 15 || !(bool) (*r)[14]) { all = false; break; }
+                    auto v = [&](int k) { return (double) (*r)[k]; };
+                    auto p = makeProc();
+                    setPlain(*p, "gain", 0.37f); setPlain(*p, "pan", 0.2f); setPlain(*p, "output", 7.f); setPlain(*p, "octave", 1.f); setPlain(*p, "comp", 0.8f);
+                    all = all && p->loadStarterPreset(i);
+                    const float semis = (float) std::lround((v(0) / 1000.0 - 0.5) * 24.0);
+                    const bool same = getPlain(*p, "table") == (float) (v(2) + 1) && getPlain(*p, "cycle") == (float) v(1) && near(getPlain(*p, "pitch"), semis)
+                        && near(getPlain(*p, "attack"), (float) (v(3) / 1000)) && near(getPlain(*p, "pitchlfodepth"), (float) (v(4) / 1000)) && near(getPlain(*p, "release"), (float) (v(5) / 1000))
+                        && near(getPlain(*p, "filterlfodepth"), (float) (v(6) / 1000)) && near(getPlain(*p, "cutoff"), (float) (v(7) / 1000)) && near(getPlain(*p, "pitchlforate"), (float) (v(8) / 1000))
+                        && near(getPlain(*p, "fx"), (float) (v(9) / 1000)) && near(getPlain(*p, "resonance"), (float) (v(10) / 1000)) && near(getPlain(*p, "filterlforate"), (float) (v(11) / 1000))
+                        && near(getPlain(*p, "fxtime"), (float) (v(12) / 1000)) && (int) v(13) == 3;
+                    if (!same) printf("    starter %d differs from the firmware file\n", i + 1);
+                    all = all && same
+                        && getPlain(*p, "octave") == 0.f && near(getPlain(*p, "comp"), 0.f)                                   // not in a firmware preset: back to the defaults
+                        && near(getPlain(*p, "gain"), 0.37f) && near(getPlain(*p, "pan"), 0.2f) && near(getPlain(*p, "output"), 7.f); // the level is never touched
+                }
+                check(all, "all 14 starter presets give the same sound parameters as firmware/card-profiles/wave-1.0/presets.json (second conversion written separately); octave / comp default, GAIN / PAN / BOOST untouched");
+            }
+        }
+        check(!makeProc()->loadStarterPreset(-1) && !makeProc()->loadStarterPreset(14), "a starter number out of range fails");
+        {
+            // Every starter makes a sound that is finite and audible, through the real processor. The levels are printed (they are
+            // the hardware's presets at the plugin's default BOOST; a peak above 1.0 would clip in a host).
+            bool allFine = true, anyHot = false;
+            for (int i = 0; i < 14; ++i)
+            {
+                auto p = makeProc();
+                p->loadStarterPreset(i);
+                juce::AudioBuffer<float> b(2, bs); float pk = 0, heldSq = 0; int heldN = 0; bool fin = true;
+                for (int blk = 0; blk < 200; ++blk)
+                {
+                    juce::MidiBuffer m;
+                    if (blk == 0) m.addEvent(juce::MidiMessage::noteOn(1, 60, (juce::uint8) 100), 0);
+                    if (blk == 60) m.addEvent(juce::MidiMessage::noteOff(1, 60), 0);
+                    b.clear(); p->processBlock(b, m);
+                    for (int k = 0; k < bs; ++k)
+                    {
+                        const float v = b.getSample(0, k);
+                        if (!std::isfinite(v)) fin = false;
+                        pk = std::fmax(pk, std::fabs(v));
+                        if (blk >= 20 && blk < 60) { heldSq += v * v; ++heldN; }
+                    }
+                }
+                const float heldRms = (float) std::sqrt(heldSq / heldN);
+                printf("    %s: peak %.3f, held rms %.4f%s\n", WT8AudioProcessor::starterPresetName(i).toRawUTF8(), pk, heldRms, pk > 1.0f ? "  (over 1.0)" : "");
+                if (pk > 1.0f) anyHot = true;
+                allFine = allFine && fin && pk > 0.001f;
+            }
+            juce::ignoreUnused(anyHot);
+            check(allFine, "every starter preset renders finite audio that is not silent (note C3, velocity 100, default output level)");
+        }
+
+        // ---- which preset is current, and has the sound changed since ----
+        {
+            auto p = makeProc();
+            check(p->getCurrentPresetKind() == WT8AudioProcessor::PresetKind::None && p->getCurrentPresetName().isEmpty() && !p->isPresetModified(), "a fresh plugin: no preset is current, nothing is 'modified'");
+            setPlain(*p, "cutoff", 0.9f);
+            check(!p->isPresetModified(), "without a current preset there is nothing to be modified");
+
+            p->loadStarterPreset(2);
+            check(p->getCurrentPresetKind() == WT8AudioProcessor::PresetKind::Starter && p->getCurrentPresetName() == "Starter 03" && !p->isPresetModified(), "a starter preset loaded: it is current, not modified");
+            const float cut = getPlain(*p, "cutoff");
+            setPlain(*p, "cutoff", cut > 0.5f ? cut - 0.2f : cut + 0.2f);
+            check(p->isPresetModified(), "moving a knob (cutoff) marks it modified");
+            setPlain(*p, "cutoff", cut);
+            check(!p->isPresetModified(), "putting the knob back removes the mark");
+            auto* cp = p->apvts.getParameter("cutoff");
+            cp->setValueNotifyingHost(cp->getValue() + 1.0e-5f);
+            check(!p->isPresetModified(), "a change smaller than any knob step (1e-5 of the range) does not count");
+            setPlain(*p, "cutoff", cut);
+            for (const char* id : {"table", "cycle", "octave", "pitch", "attack", "release", "resonance", "fx", "fxtime", "pitchlfodepth", "pitchlforate", "filterlfodepth", "filterlforate", "comp"})
+            {
+                auto* par = p->apvts.getParameter(id);
+                const float v0 = par->getValue();
+                par->setValueNotifyingHost(v0 > 0.5f ? v0 - 0.3f : v0 + 0.3f);
+                const bool flagged = p->isPresetModified();
+                par->setValueNotifyingHost(v0);
+                if (!flagged || p->isPresetModified()) { printf("    parameter %s does not behave as part of the preset\n", id); v9Ok = false; }
+            }
+            check(!p->isPresetModified(), "each of the other 14 sound parameters marks it modified, and restoring it clears the mark");
+
+            // what is not part of a preset never counts
+            setPlain(*p, "gain", 0.1f); setPlain(*p, "pan", 0.9f); setPlain(*p, "output", -9.f); setPlain(*p, "seq_swing", 70.f); setPlain(*p, "seq_loop", 4.f);
+            p->sequencer().recordNote(60, 100); p->selectPatternSlot(3);
+            check(!p->isPresetModified(), "GAIN, PAN, BOOST, sequencer settings and pattern slots do not mark it modified");
+
+            p->loadInitPreset();
+            check(p->getCurrentPresetKind() == WT8AudioProcessor::PresetKind::Init && p->getCurrentPresetName().isEmpty() && !p->isPresetModified(), "INIT loaded: current, not modified");
+            setPlain(*p, "resonance", 0.2f);
+            check(p->isPresetModified(), "...and a change marks INIT modified");
+            p->loadStarterPreset(5); p->loadStarterPreset(5);
+            check(!p->isPresetModified(), "loading the same preset again clears the mark (that is how changes are undone)");
+
+            // file presets
+            const auto folder = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("ipmohc_preset_test9_" + juce::String(juce::Random::getSystemRandom().nextInt64()));
+            p->setPresetFolder(folder);
+            setPlain(*p, "cutoff", 0.15f);
+            juce::String err;
+            check(p->savePreset("Mine", err), "set-up: save a preset");
+            check(p->getCurrentPresetKind() == WT8AudioProcessor::PresetKind::User && p->getCurrentPresetName() == "Mine" && !p->isPresetModified(), "after SAVE the saved preset is current and not modified");
+            setPlain(*p, "cutoff", 0.65f);
+            check(p->isPresetModified(), "...changing a knob afterwards marks it");
+            check(p->savePreset("Mine", err) && !p->isPresetModified(), "saving again (replacing) clears the mark");
+            check(p->savePreset("Other", err) && p->getCurrentPresetName() == "Other" && !p->isPresetModified(), "saving under another name makes that one current");
+            p->loadStarterPreset(0);
+            check(p->loadPreset("Mine") && p->getCurrentPresetKind() == WT8AudioProcessor::PresetKind::User && p->getCurrentPresetName() == "Mine" && !p->isPresetModified(), "loading a file preset makes it current, not modified");
+            setPlain(*p, "cutoff", 0.33f);
+            check(!p->loadPreset("does not exist") && p->getCurrentPresetName() == "Mine" && p->isPresetModified(), "a failed load changes nothing: the same preset stays current and still counts as modified");
+
+            // a project that is loaded brings its own sound: no preset is current
+            juce::MemoryBlock saved; p->getStateInformation(saved);
+            p->loadStarterPreset(4);
+            p->setStateInformation(saved.getData(), (int) saved.getSize());
+            check(p->getCurrentPresetKind() == WT8AudioProcessor::PresetKind::None && !p->isPresetModified(), "after a project is loaded no preset is current");
+            folder.deleteRecursively();
+        }
+        printf("v0.9 copy slot + starter presets + modified marker: %s\n", v9Ok ? "ok" : "FAILED");
+    }
+
+    bool ok = seqOk && v4Ok && v5Ok && v6Ok && v8Ok && v9Ok && finite && peak > 0.02f && peak <= 1.5f && held > 0.005f && tail < held * 0.05f && std::fabs(cutoff - 0.2f) < 0.01f;
     printf(ok ? "PASS\n" : "FAIL\n");
     return ok ? 0 : 1;
 }

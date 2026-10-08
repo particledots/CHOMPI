@@ -1,8 +1,11 @@
-// Renders the plugin editor offscreen and writes a PNG:  ./editor_snapshot out.png [width] [lane] [view] [hover] [steps] [loop] [blocks] [slot]
+// Renders the plugin editor offscreen and writes a PNG:  ./editor_snapshot out.png [width] [lane] [view] [hover] [steps] [loop] [blocks] [slot] [preset] [copy]
 // lane: pitch (default), prob, ratch, gate, accent, oct, cond.  view: grid (default), ring, ring2 (ring, page 17-32), 2rings.
 // hover: step number (1-32) the ring's centre readout should describe, as if the mouse were over it (0 = none).
 // steps: pattern length (default 12; more steps are added with varied notes and probabilities).  loop: the LOOP knob (default 10, 0 = ALL).
 // blocks: extra 512-sample blocks to run, to move the playing step (about 12 blocks per 1/16 step at 120 bpm, 48 kHz).
+// slot: pattern slot to select (1-16; it gets a note so it counts as used).  Slots 3 and 6 always hold a copy of slot 1, so their dots show.
+// preset (v0.9): none (default), init, s<n> = starter preset n loaded, s<n>mod = starter n loaded and then CUTOFF moved (the "modified" marker).
+// copy (v0.9): "copy" = press COPY, to show the armed state.
 #include "PluginEditor.h"
 #include <cstdlib>
 #include <string>
@@ -31,6 +34,7 @@ int main(int argc, char** argv)
     set("seq_swing", 0.667f); set("seq_accent", 0.5f); set("seq_octmode", 2.0f / 5.0f);
     set("seq_scale", 6.0f / 28.0f); set("seq_root", 9.0f / 11.0f); set("seq_xpose", 1.0f); // Aeolian (Natural Minor), root A, MIDI XPOSE on
     proc.setSeqTranspose(2);
+    proc.copyPatternSlot(0, 2); proc.copyPatternSlot(0, 5); // v0.9: slots 3 and 6 hold a pattern too
     proc.apvts.getParameter("seq_play")->setValueNotifyingHost(1.f);
     {
         juce::AudioBuffer<float> b(2, 512); juce::MidiBuffer m;
@@ -38,9 +42,19 @@ int main(int argc, char** argv)
         for (int i = 0; i < blocks; ++i) { m.clear(); proc.processBlock(b, m); }
     }
     if (argc > 9) { proc.selectPatternSlot(std::atoi(argv[9]) - 1); proc.sequencer().recordNote(60, 100); } // v0.8: show the PATTERN box on another slot (that slot gets one note so it counts as used)
+    if (argc > 10)
+    {
+        const juce::String spec(argv[10]);
+        if (spec.equalsIgnoreCase("init")) proc.loadInitPreset();
+        else if (spec.startsWithIgnoreCase("s"))
+        {
+            proc.loadStarterPreset(spec.substring(1).getIntValue() - 1);
+            if (spec.endsWithIgnoreCase("mod")) set("cutoff", 0.9f);
+        }
+    }
     std::unique_ptr<juce::AudioProcessorEditor> ed(proc.createEditor());
     const int w = argc > 2 ? std::atoi(argv[2]) : 840;
-    ed->setSize(w, int(w * 862.0 / 840.0));
+    ed->setSize(w, int(w * 898.0 / 840.0));
     if (argc > 3)
         for (auto* c : ed->getChildren())
             if (auto* b = dynamic_cast<juce::TextButton*>(c))
@@ -61,6 +75,10 @@ int main(int argc, char** argv)
                 if (argc > 5) grid->setHover(std::atoi(argv[5]) - 1); // 0 = none
             }
     }
+    if (argc > 11 && juce::String(argv[11]).equalsIgnoreCase("copy"))
+        for (auto* c : ed->getChildren())
+            if (auto* b = dynamic_cast<juce::TextButton*>(c))
+                if (b->getButtonText() == "COPY") b->setToggleState(true, juce::sendNotificationSync);
     auto img = ed->createComponentSnapshot(ed->getLocalBounds(), true, 1.0f);
     juce::File f(argc > 1 ? argv[1] : "editor.png");
     f.deleteFile();

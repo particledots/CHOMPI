@@ -2,6 +2,7 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include "PluginProcessor.h"
 #include "RingLayout.h"
+#include <functional>
 #include <memory>
 #include <vector>
 
@@ -96,6 +97,27 @@ class StepGrid : public juce::Component
     juce::TextButton page1Btn_{"1-16"}, page2Btn_{"17-32"};
 };
 
+/** v0.9: one of the 16 pattern-slot buttons. The lit one is the slot the sequencer plays; a small dot under the number
+    means the slot holds a pattern. (State is set by the editor's timer from the processor, never by clicking: a click only asks
+    the processor to switch.) */
+class SlotButton : public juce::TextButton
+{
+  public:
+    SlotButton() = default;
+    void paintButton(juce::Graphics&, bool isMouseOverButton, bool isButtonDown) override;
+    bool filled = false;
+};
+
+/** The preset box. JUCE only reports a pick that changes the selection, so opening the list first clears the shown selection:
+    picking the preset that is already current (the one marked as modified) then loads it again, which is how changes made
+    since it was loaded are undone. The editor's timer puts the selection back if the list is closed without a pick. */
+class PresetCombo : public juce::ComboBox
+{
+  public:
+    std::function<void()> onOpen;
+    void showPopup() override { if (onOpen) onOpen(); juce::ComboBox::showPopup(); }
+};
+
 class WT8Editor : public juce::AudioProcessorEditor, private juce::Timer
 {
   public:
@@ -123,13 +145,21 @@ class WT8Editor : public juce::AudioProcessorEditor, private juce::Timer
         juce::Rectangle<int> bounds; // filled in by resized()
     };
 
-    // v0.8: presets (sound settings as files, chosen from the header) and pattern slots (row C)
-    void refreshPresetList(const juce::String& select);
+    // Presets (sound settings, chosen from the header): INIT, the compiled-in STARTER presets (v0.9) and the user's files (v0.8).
+    // Combo item ids: 1 = INIT, 100.. = starter presets, 200.. = files in the preset folder (index into presetNames_).
+    static constexpr int kInitId = 1, kStarterId0 = 100, kUserId0 = 200;
+    void refreshPresetList();                  // rebuilds the items from the folder (and the starter list), then refreshPresetBox()
+    void refreshPresetBox();                   // selection and the "modified" marker, from what the processor says is current
+    juce::String presetItemText(int id) const; // the item's own text, without the modified marker
     void stepPreset(int dir);
     void promptSavePreset();
     void savePresetAs(const juce::String& name);
-    void refreshPatternBox();
-    void stepPatternSlot(int dir);
+
+    // v0.9 pattern slots (row E): 16 buttons choose the slot, COPY then a slot copies the current pattern into that slot
+    void refreshSlotButtons();
+    void onSlotClicked(int slot);
+    void copyCurrentSlotTo(int target);
+    void setCopyMode(bool on);
 
     Knob& addKnob(const juce::String& paramId, const juce::String& label, Kind kind, bool bipolar = false);
     void addGroup(const juce::String& title, std::initializer_list<Knob*> knobs);
@@ -147,12 +177,17 @@ class WT8Editor : public juce::AudioProcessorEditor, private juce::Timer
                      accentLaneBtn_{"ACCENT"}, octLaneBtn_{"OCT"}, condLaneBtn_{"COND"}, pendBtn_{"ENDS x2"};
     juce::TextButton gridViewBtn_{"GRID"}, ringViewBtn_{"RING"}, twoRingsViewBtn_{"2 RINGS"}; // v0.7: which view the steps are shown in (editor state only, not saved)
     juce::TextButton xposeBtn_{"MIDI XPOSE"}, xposeResetBtn_{"RESET"};
-    // v0.8
-    juce::ComboBox presetBox_, patBox_;
-    juce::TextButton presetPrevBtn_{"<"}, presetNextBtn_{">"}, presetSaveBtn_{"SAVE"}, presetFolderBtn_{"FOLDER"}, patPrevBtn_{"<"}, patNextBtn_{">"};
-    juce::Label patLabel_;
-    juce::StringArray presetNames_;   // the files in the preset folder; combo item id = index + 2 (id 1 = INIT)
-    juce::StringArray patTexts_;      // what the PATTERN box currently shows for each slot, so it is only touched when something changed
+    // presets (header) and pattern slots (row E)
+    PresetCombo presetBox_;
+    juce::TextButton presetPrevBtn_{"<"}, presetNextBtn_{">"}, presetSaveBtn_{"SAVE"}, presetFolderBtn_{"FOLDER"};
+    juce::StringArray presetNames_;   // the files in the preset folder; combo item id = kUserId0 + index
+    std::vector<int> presetIds_;      // the item ids in the order the box lists them (what < and > step through)
+    int boxSetId_ = 0;                // the id the editor itself last put in the box; a different one means the user just picked something
+    int shownPresetId_ = -1;          // what the box currently shows (0 = nothing), -1 = unknown: refreshPresetBox() redoes it
+    bool shownModified_ = false;      // whether the shown item carries the "modified" marker
+    juce::Label patLabel_;            // "PATTERN", or "COPY n TO" while COPY is armed
+    SlotButton slotBtn_[WT8AudioProcessor::kPatternSlots];
+    juce::TextButton copyBtn_{"COPY"};
     juce::ComboBox syncBox_, divBox_, dirBox_, scaleBox_, rootBox_, octBox_;
     juce::Label syncLabel_, divLabel_, laneLabel_, dirLabel_, scaleLabel_, rootLabel_, octLabel_, xposeReadout_;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> playAtt_, muteAtt_, pendAtt_, xposeAtt_;

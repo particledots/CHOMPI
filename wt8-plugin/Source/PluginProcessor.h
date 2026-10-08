@@ -4,6 +4,7 @@
 #include <atomic>
 #include <map>
 #include <string>
+#include <vector>
 #include "StepSequencer.h"
 
 class WT8Engine;
@@ -57,6 +58,10 @@ class WT8AudioProcessor : public juce::AudioProcessor
     bool patternSlotHasSteps(int slot) const;  // the current slot asks the live pattern, the others their saved text
     /** Saves the live pattern into the current slot, makes `slot` current and plays it from now on (an empty slot is silent). */
     void selectPatternSlot(int slot);
+    /** v0.9: copies the pattern of slot `from` into slot `to`, replacing whatever `to` held. The current slot keeps playing as it
+        is; only if `to` IS the current slot does the copy start playing (from step 1, as when a slot is selected). Returns false
+        (and changes nothing) when a slot number is out of range or from == to. Message thread only, like selectPatternSlot. */
+    bool copyPatternSlot(int from, int to);
 
     // ---- v0.8 presets: the SOUND settings (not the sequencer, the pattern, or the output level/pan) as small files in a
     // folder on the computer, so they are available in every project.
@@ -70,6 +75,22 @@ class WT8AudioProcessor : public juce::AudioProcessor
     bool loadPreset(const juce::String& name);
     void loadInitPreset();                                    // all sound parameters back to their defaults
     static juce::String presetFileName(const juce::String& name); // the legal file name for a preset name (without the folder)
+    static juce::String presetStem(const juce::String& name);     // the same without ".ipmohcpreset": the name the list shows
+
+    // ---- v0.9 starter presets: compiled in, read-only (StarterPresets.h). Loading one sets the same 15 sound parameters as a
+    // file preset does and leaves GAIN / PAN / BOOST and the sequencer alone.
+    static int numStarterPresets();
+    static juce::String starterPresetName(int index);         // "Starter 01" ...
+    bool loadStarterPreset(int index);
+
+    // ---- v0.9 "which preset is this, and has it been changed since": for the preset box. The preset that was last loaded (or saved)
+    // in this session counts as current; its 15 sound parameters are remembered at that moment and isPresetModified() compares the
+    // live ones with them (the output level and the sequencer are not part of a preset, so they never count). Nothing is current
+    // after a project has been loaded: the sound came back with the project, not from a preset.
+    enum class PresetKind { None, Init, Starter, User };
+    PresetKind getCurrentPresetKind() const;
+    juce::String getCurrentPresetName() const;                 // the starter / user preset's name; empty for None and Init
+    bool isPresetModified() const;
 
   private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
@@ -85,6 +106,11 @@ class WT8AudioProcessor : public juce::AudioProcessor
     int slotCur_ = 0;
     juce::File presetFolderOverride_;
     void applyPresetValues(const std::map<juce::String, float>& values);
+    void markPresetCurrent(PresetKind kind, const juce::String& name); // remembers the live sound parameters as this preset's values
+    mutable juce::CriticalSection presetLock_;          // guards the four members below (message thread, but a host may restore state elsewhere)
+    PresetKind presetKind_ = PresetKind::None;
+    juce::String presetName_;
+    std::vector<float> presetBaseline_;                 // normalised 0..1 values of presetParameterIds() when the preset became current
     std::atomic<bool> seqRecording_{false};
     std::atomic<int> seqTranspose_{0};
     // Room for the worst case a host can produce (very fast tempo, huge block, 1/32T steps with 8 repeats: ~540 events
