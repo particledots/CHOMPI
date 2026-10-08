@@ -1,6 +1,7 @@
 #pragma once
 #include <juce_audio_processors/juce_audio_processors.h>
 #include "PluginProcessor.h"
+#include "RingLayout.h"
 #include <memory>
 #include <vector>
 
@@ -16,7 +17,7 @@ class IpmohcLookAndFeel : public juce::LookAndFeel_V4
     juce::Font getComboBoxFont(juce::ComboBox&) override;
 };
 
-// 32 clickable steps (2 rows of 16, or since v0.7 optionally one ring of 16 per page) with seven lanes.
+// 32 clickable steps (2 rows of 16, or since v0.7 optionally one ring of 16 per page, or two rings side by side) with seven lanes.
 // Which lane is shown and edited is chosen with the EDIT buttons:
 //   PITCH:  click = note/rest, drag up/down or mouse wheel = pitch (in scale steps when a scale is set).
 //   PROB:   drag up/down or wheel = that step's probability, double-click = back to 100%.
@@ -30,11 +31,12 @@ class StepGrid : public juce::Component
   public:
     enum class Lane { Pitch, Prob, Ratchet, Gate, Accent, Oct, Cond };
 
-    /** GRID = the 2 x 16 cells. RING (v0.7) = the same steps on one ring of 16 (page 1-16 / 17-32): each step's value for the
-        chosen lane is a fill level in its button, and the exact value of the step under the mouse is written in the middle.
-        Display only: click / vertical drag / wheel / double-click edit the same things in both views, and switching views
-        does not change the pattern. */
-    enum class View { Grid, Ring };
+    /** GRID = the 2 x 16 cells. RING (v0.7) = the same steps on one ring of 16 (page 1-16 / 17-32). 2 RINGS (v0.7) = all 32 steps
+        on two rings side by side as a figure-eight (see RingLayout.h: 1-9 and 26-32 on the left ring, 10-25 on the right).
+        In the ring views each step's value for the chosen lane is the fill level of its button, and the exact value of the step
+        under the mouse is written in the middle of its ring. Display only: click / vertical drag / wheel / double-click edit the
+        same things in every view, and switching views does not change the pattern. */
+    enum class View { Grid, Ring, TwoRings };
 
     explicit StepGrid(StepSequencer& s);
     void refresh(); // pulls the pattern from the sequencer, repaints if anything changed
@@ -42,9 +44,9 @@ class StepGrid : public juce::Component
     void setView(View v);
     void setScale(int scale, int root) { scale_ = scale; root_ = root; } // scale -1 = off: pitch editing is chromatic
     void setGlobalGate(float g) { if (g != globalGate_) { globalGate_ = g; if (lane_ == Lane::Gate) repaint(); } } // 0.05..1, the GATE knob
-    void setLoopLength(int n) { if (n != loopLen_) { loopLen_ = n; if (view_ == View::Ring) repaint(); } } // the LOOP knob (0 = whole pattern)
+    void setLoopLength(int n) { if (n != loopLen_) { loopLen_ = n; if (view_ != View::Grid) repaint(); } } // the LOOP knob (0 = whole pattern)
     void setPage(int p);     // ring view: 0 = steps 1-16, 1 = steps 17-32
-    void setHover(int step); // the step the readout in the middle of the ring describes (-1 = none). The mouse sets it itself; editor_snapshot sets it too
+    void setHover(int step); // the step the readout in the middle of its ring describes (-1 = none). The mouse sets it itself; editor_snapshot sets it too
     void paint(juce::Graphics&) override;
     void paintOverChildren(juce::Graphics&) override;
     void resized() override;
@@ -59,11 +61,16 @@ class StepGrid : public juce::Component
   private:
     static constexpr int kRingSlots = 16;
     struct RingGeometry { juce::Point<float> centre; float outerR, buttonR, trackR; };
-    RingGeometry ringGeometry() const;
-    juce::Point<float> ringSlotCentre(int slot) const;
+    int numRings() const { return view_ == View::TwoRings ? 2 : 1; }
+    RingGeometry makeGeometry(juce::Point<float> centre, float outerR) const;
+    RingGeometry singleGeometry() const;                 // the one big ring of the RING view (also where its page buttons are placed)
+    RingGeometry ringGeometry(int ring) const;           // RING view: ring 0 only; 2 RINGS view: 0 = left, 1 = right
+    juce::Point<float> ringSlotCentre(int ring, int slot) const;
+    int slotToStep(int ring, int slot) const;            // the step a slot shows in the current view
+    bool stepToSlot(int step, int& ring, int& slot) const; // where a step is shown; false when it is not on screen (RING view, other page)
     void paintGrid(juce::Graphics&);
     void paintRing(juce::Graphics&);
-    void paintRingReadout(juce::Graphics&, const RingGeometry&);
+    void paintRingReadout(juce::Graphics&, int ring);
     /** What a lane shows for one step: its text, the bar fill 0..1, whether the value is a non-default one and whether the bar
         is dimmed (a gate that follows the GATE knob). Both views use this, so they always agree. */
     juce::String describe(const SeqStep&, float& fill, bool& bright, bool& dimBar) const;
@@ -130,7 +137,7 @@ class WT8Editor : public juce::AudioProcessorEditor, private juce::Timer
     juce::TextButton recBtn_{"REC"}, restBtn_{"REST"}, delBtn_{"DEL"}, clearBtn_{"CLEAR"}, playBtn_{"PLAY"}, muteBtn_{"MUTE"};
     juce::TextButton pitchLaneBtn_{"PITCH"}, probLaneBtn_{"PROB"}, ratchLaneBtn_{"RATCH"}, gateLaneBtn_{"GATE"},
                      accentLaneBtn_{"ACCENT"}, octLaneBtn_{"OCT"}, condLaneBtn_{"COND"}, pendBtn_{"ENDS x2"};
-    juce::TextButton gridViewBtn_{"GRID"}, ringViewBtn_{"RING"}; // v0.7: which view the steps are shown in (editor state only, not saved)
+    juce::TextButton gridViewBtn_{"GRID"}, ringViewBtn_{"RING"}, twoRingsViewBtn_{"2 RINGS"}; // v0.7: which view the steps are shown in (editor state only, not saved)
     juce::TextButton xposeBtn_{"MIDI XPOSE"}, xposeResetBtn_{"RESET"};
     juce::ComboBox syncBox_, divBox_, dirBox_, scaleBox_, rootBox_, octBox_;
     juce::Label syncLabel_, divLabel_, laneLabel_, dirLabel_, scaleLabel_, rootLabel_, octLabel_, xposeReadout_;

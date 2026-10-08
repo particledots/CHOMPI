@@ -1,6 +1,8 @@
-// Renders the plugin editor offscreen and writes a PNG:  ./editor_snapshot out.png [width] [lane] [view] [hover]
-// lane: pitch (default), prob, ratch, gate, accent, oct, cond.  view: grid (default), ring, ring2 (ring, page 17-32).
-// hover: step number (1-32) the ring's centre readout should describe, as if the mouse were over it.
+// Renders the plugin editor offscreen and writes a PNG:  ./editor_snapshot out.png [width] [lane] [view] [hover] [steps] [loop] [blocks]
+// lane: pitch (default), prob, ratch, gate, accent, oct, cond.  view: grid (default), ring, ring2 (ring, page 17-32), 2rings.
+// hover: step number (1-32) the ring's centre readout should describe, as if the mouse were over it (0 = none).
+// steps: pattern length (default 12; more steps are added with varied notes and probabilities).  loop: the LOOP knob (default 10, 0 = ALL).
+// blocks: extra 512-sample blocks to run, to move the playing step (about 12 blocks per 1/16 step at 120 bpm, 48 kHz).
 #include "PluginEditor.h"
 #include <cstdlib>
 #include <string>
@@ -16,7 +18,10 @@ int main(int argc, char** argv)
     for (int n : {60, 64, 67, 72}) proc.sequencer().recordNote(n, 100);
     proc.sequencer().addRest(); for (int n : {65, 62, 59, 55, 57, 60, 64}) proc.sequencer().recordNote(n, 90);
     for (int i = 0; i < 12; ++i) proc.sequencer().setProb(i, i % 4 == 0 ? 100 : 100 - i * 7); // a few non-default step probabilities
-    set("seq_dir", 2.0f / 3.0f); set("seq_prob", 0.8f); set("seq_loop", 10.0f / 32.0f); set("seq_seed", 0.0f);
+    const int totalSteps = argc > 6 ? std::atoi(argv[6]) : 12;
+    for (int i = 12; i < totalSteps && i < 32; ++i) { proc.sequencer().recordNote(55 + (i * 7) % 19, 90); proc.sequencer().setProb(i, 35 + (i * 13) % 66); }
+    const int loopKnob = argc > 7 ? std::atoi(argv[7]) : 10;
+    set("seq_dir", 2.0f / 3.0f); set("seq_prob", 0.8f); set("seq_loop", loopKnob / 32.0f); set("seq_seed", 0.0f);
     // v0.6: a few non-default per-step values and settings so every lane has something to show
     for (int i : {0, 4, 8, 12}) proc.sequencer().setRatchet(i, i == 0 ? 3 : (i == 4 ? 2 : (i == 8 ? 4 : 8)));
     proc.sequencer().setStepGate(2, 80); proc.sequencer().setStepGate(6, 25); proc.sequencer().setStepGate(9, 100);
@@ -27,7 +32,11 @@ int main(int argc, char** argv)
     set("seq_scale", 6.0f / 28.0f); set("seq_root", 9.0f / 11.0f); set("seq_xpose", 1.0f); // Aeolian (Natural Minor), root A, MIDI XPOSE on
     proc.setSeqTranspose(2);
     proc.apvts.getParameter("seq_play")->setValueNotifyingHost(1.f);
-    { juce::AudioBuffer<float> b(2, 512); juce::MidiBuffer m; proc.processBlock(b, m); proc.processBlock(b, m); }
+    {
+        juce::AudioBuffer<float> b(2, 512); juce::MidiBuffer m;
+        const int blocks = 2 + (argc > 8 ? std::atoi(argv[8]) : 0);
+        for (int i = 0; i < blocks; ++i) { m.clear(); proc.processBlock(b, m); }
+    }
     std::unique_ptr<juce::AudioProcessorEditor> ed(proc.createEditor());
     const int w = argc > 2 ? std::atoi(argv[2]) : 840;
     ed->setSize(w, int(w * 862.0 / 840.0));
@@ -41,14 +50,14 @@ int main(int argc, char** argv)
         for (auto* c : ed->getChildren())
         {
             if (auto* b = dynamic_cast<juce::TextButton*>(c))
-                if (b->getRadioGroupId() == 1002 && b->getButtonText().equalsIgnoreCase(view.startsWithIgnoreCase("ring") ? "ring" : "grid"))
+                if (b->getRadioGroupId() == 1002 && b->getButtonText().equalsIgnoreCase(view.equalsIgnoreCase("2rings") ? "2 rings" : (view.startsWithIgnoreCase("ring") ? "ring" : "grid")))
                     b->setToggleState(true, juce::sendNotificationSync);
         }
         for (auto* c : ed->getChildren())
             if (auto* grid = dynamic_cast<StepGrid*>(c))
             {
                 if (view.equalsIgnoreCase("ring2")) grid->setPage(1);
-                if (argc > 5) grid->setHover(std::atoi(argv[5]) - 1);
+                if (argc > 5) grid->setHover(std::atoi(argv[5]) - 1); // 0 = none
             }
     }
     auto img = ed->createComponentSnapshot(ed->getLocalBounds(), true, 1.0f);

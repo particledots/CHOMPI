@@ -1,5 +1,6 @@
 // Headless timing tests for StepSequencer (no JUCE, no audio).  Run: ./seq_test
 #include "StepSequencer.h"
+#include "RingLayout.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cmath>
@@ -683,6 +684,45 @@ int main()
           CHECK(ok && worst > 64, "990 bpm, 1/32T, 8 repeats, 8192-sample blocks: at most %d events per block, far above the old 64-event buffer, still below 2048", worst); }
         CHECK(allOk, "60 random patterns / settings: on and off strictly alternate with matching notes, nothing left sounding, buffer never full");
         printf("  (%lld note-ons in total, at most %d events in one block)\n", totalOns, worstEvents);
+    }
+
+    // ---- v0.7 ring views: which ring / slot shows which step (display mapping only, JUCE-free) ----
+    {
+        printf("T28 2 RINGS layout: every step has its own slot, 1-9 + 26-32 on the left ring, 10-25 on the right, neighbours stay neighbours\n");
+        bool distinct = true, roundTrip = true, inverseOk = true;
+        int seen[2][RingLayout::kSlots] = {};
+        for (int st = 0; st < RingLayout::kSteps; ++st)
+        {
+            int ring = -1, slot = -1; RingLayout::twoRingsSlot(st, ring, slot);
+            if (ring < 0 || ring > 1 || slot < 0 || slot >= RingLayout::kSlots) { distinct = false; continue; }
+            if (++seen[ring][slot] > 1) distinct = false;
+            if (RingLayout::twoRingsStep(ring, slot) != st) roundTrip = false;
+        }
+        for (int r = 0; r < 2; ++r) for (int k = 0; k < RingLayout::kSlots; ++k)
+        { int ring2 = -1, slot2 = -1; const int st = RingLayout::twoRingsStep(r, k); RingLayout::twoRingsSlot(st, ring2, slot2); if (st < 0 || st > 31 || ring2 != r || slot2 != k) inverseOk = false; }
+        CHECK(distinct, "all 32 steps land on distinct slots (16 per ring)");
+        CHECK(roundTrip && inverseOk, "step -> slot -> step and slot -> step -> slot both give back what they started with");
+        int ringOf[32], slotOf[32];
+        for (int st = 0; st < 32; ++st) RingLayout::twoRingsSlot(st, ringOf[st], slotOf[st]);
+        bool leftOk = true, rightOk = true;
+        for (int st = 0; st < 32; ++st) { const bool left = st <= 8 || st >= 25; if ((ringOf[st] == 0) != left) leftOk = false; if ((ringOf[st] == 1) != (st >= 9 && st <= 24)) rightOk = false; }
+        CHECK(leftOk && rightOk, "steps 1-9 and 26-32 are on the left ring, steps 10-25 on the right ring");
+        // the order along the path: the next step is the next slot clockwise on the same ring, except at the two hops
+        int hops = 0; bool stepsOk = true;
+        for (int st = 0; st < 32; ++st)
+        {
+            const int nx = (st + 1) % 32;
+            if (ringOf[st] == ringOf[nx]) { if (slotOf[nx] != (slotOf[st] + 1) % RingLayout::kSlots) stepsOk = false; }
+            else { ++hops; if (!(st == 8 || st == 24)) stepsOk = false; }
+        }
+        CHECK(stepsOk && hops == 2, "consecutive steps are clockwise neighbours on one ring; the only hops between rings are step 9 -> 10 and 25 -> 26 (found %d hops)", hops);
+        CHECK(ringOf[0] == 0 && slotOf[0] == 12 && ringOf[8] == 0 && slotOf[8] == 4 && ringOf[9] == 1 && slotOf[9] == 12 &&
+              ringOf[24] == 1 && slotOf[24] == 11 && ringOf[25] == 0 && slotOf[25] == 5 && ringOf[31] == 0 && slotOf[31] == 11,
+              "step 1 at the left ring's 9 o'clock, step 9 at its 3 o'clock, step 10 at the right ring's 9 o'clock, step 25 at its 8 o'clock, step 26 at the left ring's 4 o'clock, step 32 at its 8 o'clock");
+        int r1 = -1, s1 = -1; RingLayout::twoRingsSlot(-5, r1, s1); int r2 = -1, s2 = -1; RingLayout::twoRingsSlot(99, r2, s2);
+        CHECK(r1 == ringOf[0] && s1 == slotOf[0] && r2 == ringOf[31] && s2 == slotOf[31], "a step outside 1..32 is clamped");
+        CHECK(RingLayout::singleRingStep(0, 0) == 0 && RingLayout::singleRingStep(15, 0) == 15 && RingLayout::singleRingStep(0, 1) == 16 && RingLayout::singleRingStep(15, 1) == 31,
+              "single ring: page 1 shows steps 1-16, page 2 steps 17-32");
     }
 
     printf(failures ? "FAIL (%d)\n" : "PASS\n", failures);
