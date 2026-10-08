@@ -120,6 +120,87 @@ void StepGrid::refresh()
     repaint();
 }
 
+StepGrid::StepGrid(StepSequencer& s) : seq_(s)
+{
+    for (auto* b : {&page1Btn_, &page2Btn_})
+    {
+        b->setClickingTogglesState(true);
+        b->setRadioGroupId(1003);
+        addChildComponent(*b); // only shown in the ring view
+    }
+    page1Btn_.setToggleState(true, juce::dontSendNotification);
+    page1Btn_.onClick = [this] { if (page1Btn_.getToggleState()) setPage(0); };
+    page2Btn_.onClick = [this] { if (page2Btn_.getToggleState()) setPage(1); };
+}
+
+void StepGrid::setView(View v)
+{
+    if (v == view_) return;
+    view_ = v;
+    hover_ = -1;
+    page1Btn_.setVisible(v == View::Ring);
+    page2Btn_.setVisible(v == View::Ring);
+    repaint();
+}
+
+void StepGrid::setPage(int p)
+{
+    p = juce::jlimit(0, 1, p);
+    if (p == page_) return;
+    page_ = p;
+    hover_ = -1;
+    (p == 0 ? page1Btn_ : page2Btn_).setToggleState(true, juce::dontSendNotification);
+    repaint();
+}
+
+void StepGrid::setHover(int step)
+{
+    if (step == hover_) return;
+    hover_ = step;
+    if (view_ == View::Ring) repaint();
+}
+
+const char* StepGrid::laneName(Lane l)
+{
+    switch (l)
+    {
+        case Lane::Pitch: return "PITCH";   case Lane::Prob: return "PROB";   case Lane::Ratchet: return "RATCH";
+        case Lane::Gate: return "GATE";     case Lane::Accent: return "ACCENT"; case Lane::Oct: return "OCT";
+        case Lane::Cond: return "COND";
+    }
+    return "";
+}
+
+// ---- ring geometry: one ring of 16 buttons, step 1 at the top, clockwise; as big as the component allows ----
+StepGrid::RingGeometry StepGrid::ringGeometry() const
+{
+    RingGeometry g;
+    g.centre = getLocalBounds().toFloat().getCentre();
+    g.outerR = juce::jmax(10.0f, (float) juce::jmin(getWidth(), getHeight()) * 0.5f - 8.0f); // margin leaves room for the playing step's glow
+    g.buttonR = g.outerR * 0.140f;
+    g.trackR = g.outerR - g.buttonR - g.outerR * 0.04f;
+    return g;
+}
+
+juce::Point<float> StepGrid::ringSlotCentre(int slot) const
+{
+    const auto g = ringGeometry();
+    const float a = -juce::MathConstants<float>::halfPi + juce::MathConstants<float>::twoPi * (float) slot / (float) kRingSlots;
+    return {g.centre.x + g.trackR * std::cos(a), g.centre.y + g.trackR * std::sin(a)};
+}
+
+void StepGrid::resized()
+{
+    // the two page buttons sit to the right of the ring, one above the other
+    const auto g = ringGeometry();
+    const float sc = getWidth() / 612.0f;
+    const int bw = juce::roundToInt(64.0f * sc), bh = juce::roundToInt(26.0f * sc), gap = juce::roundToInt(6.0f * sc);
+    const int x = juce::roundToInt(g.centre.x + g.outerR + 24.0f * sc);
+    const int top = juce::roundToInt(g.centre.y) - bh - gap / 2;
+    page1Btn_.setBounds(x, top, bw, bh);
+    page2Btn_.setBounds(x, top + bh + gap, bw, bh);
+}
+
 juce::Rectangle<float> StepGrid::cellBounds(int i) const
 {
     const float w = getWidth() / 16.0f, h = getHeight() / 2.0f;
@@ -129,6 +210,19 @@ juce::Rectangle<float> StepGrid::cellBounds(int i) const
 int StepGrid::cellAt(juce::Point<int> p) const
 {
     if (!getLocalBounds().contains(p)) return -1;
+    if (view_ == View::Ring) // the button whose centre is nearest, if the point is within (a little more than) its radius
+    {
+        const auto g = ringGeometry();
+        const auto pf = p.toFloat();
+        int best = -1;
+        float bestD = g.buttonR * 1.2f;
+        for (int s = 0; s < kRingSlots; ++s)
+        {
+            const float d = pf.getDistanceFrom(ringSlotCentre(s));
+            if (d <= bestD) { bestD = d; best = s; }
+        }
+        return best < 0 ? -1 : page_ * kRingSlots + best;
+    }
     const int col = juce::jlimit(0, 15, (int) (p.x / (getWidth() / 16.0f)));
     const int row = juce::jlimit(0, 1, (int) (p.y / (getHeight() / 2.0f)));
     return row * 16 + col;
@@ -173,7 +267,29 @@ void StepGrid::setLaneValue(int i, int v)
     }
 }
 
+juce::String StepGrid::describe(const SeqStep& st, float& fill, bool& bright, bool& dimBar) const
+{
+    fill = 0.0f; bright = true; dimBar = false;
+    juce::String text;
+    switch (lane_)
+    {
+        case Lane::Pitch:   text = noteName(st.note); break;
+        case Lane::Prob:    fill = st.prob / 100.0f; text = juce::String(st.prob) + "%"; break;
+        case Lane::Ratchet: fill = (st.ratchet - 1) / 7.0f; bright = st.ratchet > 1; text = "x" + juce::String(st.ratchet); break;
+        case Lane::Gate:    fill = effectiveGate(st) / 100.0f; bright = st.gate > 0; dimBar = st.gate == 0; text = juce::String(effectiveGate(st)) + "%"; break;
+        case Lane::Accent:  fill = st.accent ? 1.0f : 0.0f; bright = st.accent; text = st.accent ? "ACC" : "-"; break;
+        case Lane::Oct:     fill = st.octChance / 100.0f; bright = st.octChance > 0; text = juce::String(st.octChance) + "%"; break;
+        case Lane::Cond:    bright = st.condB > 1; text = st.condB > 1 ? juce::String(st.condA) + ":" + juce::String(st.condB) : juce::String("ALL"); break;
+    }
+    return text;
+}
+
 void StepGrid::paint(juce::Graphics& g)
+{
+    if (view_ == View::Ring) paintRing(g); else paintGrid(g);
+}
+
+void StepGrid::paintGrid(juce::Graphics& g)
 {
     const float scale = getWidth() / 700.0f;
     const bool barLane = lane_ != Lane::Pitch;
@@ -194,17 +310,7 @@ void StepGrid::paint(juce::Graphics& g)
 
             // what this lane shows for the step: a bar (fill 0..1), a text, and whether the value is a non-default one
             float fill = 0.0f; bool bright = true, dimBar = false;
-            juce::String text;
-            switch (lane_)
-            {
-                case Lane::Pitch:   text = noteName(st.note); break;
-                case Lane::Prob:    fill = st.prob / 100.0f; text = juce::String(st.prob) + "%"; break;
-                case Lane::Ratchet: fill = (st.ratchet - 1) / 7.0f; bright = st.ratchet > 1; text = "x" + juce::String(st.ratchet); break;
-                case Lane::Gate:    fill = effectiveGate(st) / 100.0f; bright = st.gate > 0; dimBar = st.gate == 0; text = juce::String(effectiveGate(st)) + "%"; break;
-                case Lane::Accent:  fill = st.accent ? 1.0f : 0.0f; bright = st.accent; text = st.accent ? "ACC" : "-"; break;
-                case Lane::Oct:     fill = st.octChance / 100.0f; bright = st.octChance > 0; text = juce::String(st.octChance) + "%"; break;
-                case Lane::Cond:    bright = st.condB > 1; text = st.condB > 1 ? juce::String(st.condA) + ":" + juce::String(st.condB) : juce::String("ALL"); break;
-            }
+            const juce::String text = describe(st, fill, bright, dimBar);
 
             // in the PITCH lane the playing step is filled solid; in the other lanes the fill is the value bar
             const bool solid = isPlaying && !barLane;
@@ -224,12 +330,127 @@ void StepGrid::paint(juce::Graphics& g)
             g.drawRoundedRectangle(r.reduced(0.5f), 5.0f, isPlaying && barLane ? 2.0f : 1.0f);
             g.setColour(solid ? kBg : (rest ? kDim : (bright ? kText : kDim)));
             g.setFont(makeFont(juce::jmax(9.0f, 12.5f * scale), true));
-            g.drawText(rest && barLane ? juce::String("-") : (rest ? juce::String("-") : text), r, juce::Justification::centred);
+            g.drawText(rest ? juce::String("-") : text, r, juce::Justification::centred);
         }
         g.setColour(isPlaying && lane_ == Lane::Pitch ? kBg : kDim.withAlpha(0.8f));
         g.setFont(makeFont(juce::jmax(7.0f, 8.5f * scale)));
         g.drawText(juce::String(i + 1), r.reduced(4.0f, 2.0f), juce::Justification::topLeft);
     }
+}
+
+// ---- ring view (v0.7). Same look as the grid: the lane value is the fill level of the button, the playing step has the amber
+// outline and a brighter fill (plus a soft glow); steps beyond the LOOP length are dimmed; the exact value is in the middle. ----
+void StepGrid::paintRing(juce::Graphics& g)
+{
+    const auto geo = ringGeometry();
+    const bool barLane = lane_ != Lane::Pitch;
+    const int base = page_ * kRingSlots;
+    const int effLoop = loopLen_ <= 0 ? len_ : juce::jmin(loopLen_, len_);
+
+    g.setColour(kEdge.withAlpha(0.7f));
+    g.drawEllipse(geo.centre.x - geo.trackR, geo.centre.y - geo.trackR, geo.trackR * 2.0f, geo.trackR * 2.0f, 1.2f);
+
+    if (playing_ >= base && playing_ < base + kRingSlots && playing_ < len_) // soft glow behind the playing step
+    {
+        const auto c = ringSlotCentre(playing_ - base);
+        const float gr = geo.buttonR * 2.0f;
+        g.setGradientFill(juce::ColourGradient(kAccent.withAlpha(0.35f), c, kAccent.withAlpha(0.0f), c.translated(gr, 0.0f), true));
+        g.fillEllipse(c.x - gr, c.y - gr, gr * 2.0f, gr * 2.0f);
+    }
+
+    for (int slot = 0; slot < kRingSlots; ++slot)
+    {
+        const int i = base + slot;
+        const auto c = ringSlotCentre(slot);
+        const float r = geo.buttonR;
+        const juce::Rectangle<float> box(c.x - r, c.y - r, r * 2.0f, r * 2.0f);
+        const bool inUse = i < len_;
+        const bool outsideLoop = inUse && i >= effLoop;
+        const bool isPlaying = i == playing_ && inUse;
+        const int shown = dragIdx_ >= 0 ? dragIdx_ : hover_;
+
+        if (outsideLoop) g.beginTransparencyLayer(0.4f);
+        bool rest = true;
+        if (!inUse)
+        {
+            g.setColour(kEdge.withAlpha(0.6f));
+            g.drawEllipse(box.reduced(0.5f), 1.0f);
+        }
+        else
+        {
+            const SeqStep& st = steps_[i];
+            rest = st.rest;
+            float fill = 0.0f; bool bright = true, dimBar = false;
+            describe(st, fill, bright, dimBar);
+
+            const bool solid = isPlaying && !barLane;
+            g.setColour(solid ? kAccent : (rest ? juce::Colour(0xff1b1c20) : juce::Colour(0xff2d2f35)));
+            g.fillEllipse(box);
+            if (barLane && !rest && fill > 0.0f)
+            {
+                juce::Path clip; clip.addEllipse(box);
+                g.saveState();
+                g.reduceClipRegion(clip);
+                const float h = box.getHeight() * fill;
+                g.setColour(kAccent.withAlpha(isPlaying ? 0.85f : (dimBar ? 0.22f : 0.42f)));
+                g.fillRect(box.getX(), box.getBottom() - h, box.getWidth(), h);
+                g.restoreState();
+            }
+            g.setColour(isPlaying ? kAccent : kEdge);
+            g.drawEllipse(box.reduced(0.5f), isPlaying && barLane ? 2.0f : 1.0f);
+        }
+        if (i == shown) // the step the readout describes
+        {
+            g.setColour(kText.withAlpha(0.95f));
+            g.drawEllipse(box.reduced(0.8f), 1.6f);
+        }
+        g.setColour(!inUse || rest ? kDim : (isPlaying ? kBg : kText.withAlpha(0.9f)));
+        g.setFont(makeFont(juce::jmax(7.0f, r * 0.82f), true));
+        g.drawText(juce::String(i + 1), box, juce::Justification::centred);
+        if (outsideLoop) g.endTransparencyLayer();
+    }
+    paintRingReadout(g, geo);
+}
+
+void StepGrid::paintRingReadout(juce::Graphics& g, const RingGeometry& geo)
+{
+    const float R = geo.outerR;
+    const auto c = geo.centre;
+    const int shown = dragIdx_ >= 0 ? dragIdx_ : (hover_ >= 0 ? hover_ : (playing_ < len_ ? playing_ : -1));
+
+    auto line = [&](const juce::String& text, float cy, float height, juce::Colour col)
+    {
+        juce::Font f = makeFont(height, true);
+        juce::GlyphArrangement ga;
+        ga.addLineOfText(f, text, 0.0f, 0.0f);
+        const float w = ga.getBoundingBox(0, -1, true).getWidth(), maxW = R * 1.25f;
+        if (w > maxW) f = makeFont(height * maxW / w, true); // long texts shrink to fit inside the ring
+        g.setColour(col);
+        g.setFont(f);
+        g.drawText(text, juce::Rectangle<float>(c.x - R * 0.7f, cy - height, R * 1.4f, height * 2.0f), juce::Justification::centred);
+    };
+
+    if (shown < 0) { line(laneName(lane_), c.y, R * 0.16f, kAccent); return; } // nothing to describe: just the lane name
+
+    line("STEP " + juce::String(shown + 1), c.y - R * 0.30f, R * 0.125f, kDim);
+    line(laneName(lane_), c.y - R * 0.13f, R * 0.125f, kAccent);
+    if (shown >= len_) { line("EMPTY", c.y + R * 0.17f, R * 0.22f, kDim); return; }
+    const SeqStep& st = steps_[shown];
+    if (st.rest) { line("REST", c.y + R * 0.17f, R * 0.26f, kDim); return; }
+    float fill = 0.0f; bool bright = true, dimBar = false;
+    line(describe(st, fill, bright, dimBar), c.y + R * 0.17f, R * 0.30f, bright ? kText : kDim);
+    if (lane_ == Lane::Gate && st.gate == 0) line("FOLLOWS KNOB", c.y + R * 0.42f, R * 0.10f, kDim);
+}
+
+void StepGrid::paintOverChildren(juce::Graphics& g)
+{
+    // ring view: a small amber dot on the page button of the other page when the playing step is over there
+    if (view_ != View::Ring || playing_ < 0 || playing_ >= len_) return;
+    const int playPage = playing_ / kRingSlots;
+    if (playPage == page_) return;
+    const auto& b = playPage == 0 ? page1Btn_ : page2Btn_;
+    g.setColour(kAccent);
+    g.fillEllipse((float) b.getRight() - 11.0f, (float) b.getY() + 4.0f, 7.0f, 7.0f);
 }
 
 void StepGrid::mouseDown(const juce::MouseEvent& e)
@@ -238,6 +459,17 @@ void StepGrid::mouseDown(const juce::MouseEvent& e)
     dragged_ = false;
     dragStartY_ = e.y;
     dragStartValue_ = (dragIdx_ >= 0 && dragIdx_ < len_) ? laneValue(steps_[dragIdx_]) : (lane_ == Lane::Pitch ? 60 : 0);
+    if (view_ == View::Ring) { setHover(dragIdx_); repaint(); } // the readout follows the step being pressed (vertical drag, as in the grid)
+}
+
+void StepGrid::mouseMove(const juce::MouseEvent& e)
+{
+    if (view_ == View::Ring) setHover(cellAt(e.getPosition()));
+}
+
+void StepGrid::mouseExit(const juce::MouseEvent&)
+{
+    if (view_ == View::Ring && dragIdx_ < 0) setHover(-1);
 }
 
 void StepGrid::mouseDrag(const juce::MouseEvent& e)
@@ -259,7 +491,7 @@ void StepGrid::mouseDrag(const juce::MouseEvent& e)
     refresh();
 }
 
-void StepGrid::mouseUp(const juce::MouseEvent&)
+void StepGrid::mouseUp(const juce::MouseEvent& e)
 {
     if (!dragged_ && dragIdx_ >= 0)
     {
@@ -267,6 +499,7 @@ void StepGrid::mouseUp(const juce::MouseEvent&)
         else if (lane_ == Lane::Accent) { seq_.toggleAccent(dragIdx_); refresh(); } // in the other lanes a plain click does nothing
     }
     dragIdx_ = -1;
+    if (view_ == View::Ring) { setHover(cellAt(e.getPosition())); repaint(); }
 }
 
 void StepGrid::mouseDoubleClick(const juce::MouseEvent& e)
@@ -480,6 +713,17 @@ WT8Editor::WT8Editor(WT8AudioProcessor& p) : juce::AudioProcessorEditor(&p), pro
     addLane(condLaneBtn_, StepGrid::Lane::Cond);
     pitchLaneBtn_.setToggleState(true, juce::dontSendNotification);
 
+    // v0.7 view switch: the same steps as the 2 x 16 grid or as one ring (editor state only, like the lane; a reopened editor starts in GRID)
+    for (auto* b : {&gridViewBtn_, &ringViewBtn_})
+    {
+        b->setClickingTogglesState(true);
+        b->setRadioGroupId(1002);
+        addAndMakeVisible(*b);
+    }
+    gridViewBtn_.onClick = [this] { if (gridViewBtn_.getToggleState()) grid_.setView(StepGrid::View::Grid); };
+    ringViewBtn_.onClick = [this] { if (ringViewBtn_.getToggleState()) grid_.setView(StepGrid::View::Ring); };
+    gridViewBtn_.setToggleState(true, juce::dontSendNotification);
+
     pendBtn_.setClickingTogglesState(true);
     addAndMakeVisible(pendBtn_);
     pendAtt_ = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(proc_.apvts, "seq_pendrep", pendBtn_);
@@ -513,9 +757,9 @@ WT8Editor::WT8Editor(WT8AudioProcessor& p) : juce::AudioProcessorEditor(&p), pro
     addAndMakeVisible(grid_);
 
     setResizable(true, true);
-    setResizeLimits(630, 572, 1260, 1143);
-    getConstrainer()->setFixedAspectRatio(840.0 / 762.0);
-    setSize(840, 762);
+    setResizeLimits(630, 647, 1260, 1293); // v0.7: 840 x 862 (was 840 x 762) to give the ring room
+    getConstrainer()->setFixedAspectRatio(840.0 / 862.0);
+    setSize(840, 862);
     grid_.refresh();
     timerCallback(); // fill in the transpose readout and scale state straight away
     startTimerHz(15);
@@ -529,6 +773,7 @@ void WT8Editor::timerCallback()
     pendBtn_.setEnabled(dirBox_.getSelectedItemIndex() == 2);  // end-repeat only applies to the pendulum
 
     grid_.setGlobalGate(*proc_.apvts.getRawParameterValue("seq_gate")); // the GATE lane shows this for steps without their own gate
+    grid_.setLoopLength(juce::roundToInt(proc_.apvts.getRawParameterValue("seq_loop")->load())); // the ring view dims the steps beyond the loop
 
     // scale (item 0 of the box = Off) for the grid's pitch editing
     grid_.setScale(scaleBox_.getSelectedItemIndex() - 1, rootBox_.getSelectedItemIndex());
@@ -682,6 +927,8 @@ void WT8Editor::resized()
     controls = inner.removeFromTop(int(30 * scale));
     put(laneLabel_, 34); put(pitchLaneBtn_, 54); put(probLaneBtn_, 50); put(ratchLaneBtn_, 58); put(gateLaneBtn_, 50);
     put(accentLaneBtn_, 62); put(octLaneBtn_, 46); put(condLaneBtn_, 52);
+    controls.removeFromLeft(int(10 * scale));
+    put(gridViewBtn_, 48); put(ringViewBtn_, 48);
 
     inner.removeFromTop(int(6 * scale));
     grid_.setBounds(inner);

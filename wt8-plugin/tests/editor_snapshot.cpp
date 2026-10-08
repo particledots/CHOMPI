@@ -1,5 +1,6 @@
-// Renders the plugin editor offscreen and writes a PNG:  ./editor_snapshot out.png [width] [lane]
-// (the third argument picks the grid lane: pitch (default), prob, ratch, gate, accent, oct, cond)
+// Renders the plugin editor offscreen and writes a PNG:  ./editor_snapshot out.png [width] [lane] [view] [hover]
+// lane: pitch (default), prob, ratch, gate, accent, oct, cond.  view: grid (default), ring, ring2 (ring, page 17-32).
+// hover: step number (1-32) the ring's centre readout should describe, as if the mouse were over it.
 #include "PluginEditor.h"
 #include <cstdlib>
 #include <string>
@@ -29,11 +30,27 @@ int main(int argc, char** argv)
     { juce::AudioBuffer<float> b(2, 512); juce::MidiBuffer m; proc.processBlock(b, m); proc.processBlock(b, m); }
     std::unique_ptr<juce::AudioProcessorEditor> ed(proc.createEditor());
     const int w = argc > 2 ? std::atoi(argv[2]) : 840;
-    ed->setSize(w, int(w * 762.0 / 840.0));
+    ed->setSize(w, int(w * 862.0 / 840.0));
     if (argc > 3)
         for (auto* c : ed->getChildren())
             if (auto* b = dynamic_cast<juce::TextButton*>(c))
                 if (b->getRadioGroupId() == 1001 && b->getButtonText().equalsIgnoreCase(argv[3])) b->setToggleState(true, juce::sendNotificationSync);
+    if (argc > 4)
+    {
+        const juce::String view(argv[4]);
+        for (auto* c : ed->getChildren())
+        {
+            if (auto* b = dynamic_cast<juce::TextButton*>(c))
+                if (b->getRadioGroupId() == 1002 && b->getButtonText().equalsIgnoreCase(view.startsWithIgnoreCase("ring") ? "ring" : "grid"))
+                    b->setToggleState(true, juce::sendNotificationSync);
+        }
+        for (auto* c : ed->getChildren())
+            if (auto* grid = dynamic_cast<StepGrid*>(c))
+            {
+                if (view.equalsIgnoreCase("ring2")) grid->setPage(1);
+                if (argc > 5) grid->setHover(std::atoi(argv[5]) - 1);
+            }
+    }
     auto img = ed->createComponentSnapshot(ed->getLocalBounds(), true, 1.0f);
     juce::File f(argc > 1 ? argv[1] : "editor.png");
     f.deleteFile();
