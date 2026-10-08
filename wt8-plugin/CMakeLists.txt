@@ -28,7 +28,7 @@ set_target_properties(daisysp PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # ---------------------------------------------------------------------------
 # WT8 engine: CHOMPI WAVE headers (one small sample-rate change to the delay) + a few shims + our small wrapper
 # ---------------------------------------------------------------------------
-add_library(wt8_engine STATIC Source/WT8Engine.cpp Source/StepSequencer.cpp)
+add_library(wt8_engine STATIC Source/WT8Engine.cpp Source/StepSequencer.cpp Source/WavetableImport.cpp)
 # shim must come first so our stubs replace the hardware-bound headers
 target_include_directories(wt8_engine PRIVATE Source/shim Source/engine)
 target_include_directories(wt8_engine PUBLIC Source)

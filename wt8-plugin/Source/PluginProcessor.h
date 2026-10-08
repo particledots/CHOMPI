@@ -92,8 +92,29 @@ class WT8AudioProcessor : public juce::AudioProcessor
     juce::String getCurrentPresetName() const;                 // the starter / user preset's name; empty for None and Init
     bool isPresetModified() const;
 
+    // ---- v0.10 user wavetables: any of the 7 table slots can hold a table loaded from a .wav file instead of the built-in one.
+    // The loaded table is stored inside the project (about 270 KB per slot), so a project does not depend on the file any more.
+    // A preset only remembers the TABLE number, not the table. Message thread, like the pattern slots.
+    static constexpr int kTableSlots = 7;                      // = WT8Engine::kNumTables
+    /** Reads `file` (a WAV), converts it to 33 x 2048 (WavetableImport.h) and puts it in `slot` (0..6). `message` says what
+        was done, or why not; on failure nothing changes. */
+    bool loadUserTable(int slot, const juce::File& file, juce::String& message);
+    void resetUserTable(int slot);                             // back to the built-in table
+    bool slotHasUserTable(int slot) const;
+    juce::String userTableName(int slot) const;                // the file name it came from, empty for a built-in table
+
   private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
+    void setSlotData(int slot, const std::vector<float>& data); // hands a table to the audio thread, which copies it into the engine
+    bool builtinTableData(int slot, std::vector<float>& out) const;
+    void applyPendingTables();                                  // audio thread: copies what setSlotData handed over (never waits)
+    mutable juce::CriticalSection userLock_;                    // guards userTable_ / userName_
+    std::vector<float> userTable_[kTableSlots];                 // empty = the built-in table
+    juce::String userName_[kTableSlots];
+    juce::SpinLock handoffLock_;                                // the audio thread only try-locks it
+    std::vector<float> handoff_[kTableSlots];
+    std::atomic<bool> handoffFlag_[kTableSlots];
+    std::atomic<bool> handoffAny_{false};
     void loadWavetables(WT8Engine& e);
 
     std::unique_ptr<WT8Engine> engine_;

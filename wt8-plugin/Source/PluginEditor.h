@@ -155,6 +155,14 @@ class WT8Editor : public juce::AudioProcessorEditor, private juce::Timer
     void promptSavePreset();
     void savePresetAs(const juce::String& name);
 
+    // v0.10 user wavetables: LOAD puts a .wav into the table slot the WAVETABLE knob points at, RESET brings the built-in one back
+    void refreshTableControls();
+    void loadTableFromFile();
+    juce::TextButton loadTableBtn_{"LOAD"}, resetTableBtn_{"RESET"};
+    Knob* tableKnob_ = nullptr;
+    juce::String shownTableLabel_;
+    std::unique_ptr<juce::FileChooser> tableChooser_;
+
     // v0.9 pattern slots (row E): 16 buttons choose the slot, COPY then a slot copies the current pattern into that slot
     void refreshSlotButtons();
     void onSlotClicked(int slot);

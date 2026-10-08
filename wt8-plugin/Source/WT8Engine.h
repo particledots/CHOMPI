@@ -45,6 +45,10 @@ class WT8Engine
      *  Returns false if the data isn't in the expected format. */
     bool loadWavetable(int index, const void* wavData, size_t numBytes);
 
+    /** v0.10: replaces table `index` with `numFloats` (must be 33 x 2048) already-decoded samples. Same effect as loadWavetable().
+     *  Call it from the thread that renders (or while nothing renders): the voices read the table memory directly. */
+    bool setTableData(int index, const float* data, size_t numFloats);
+
     void setParams(const Params& p);
 
     // `fromSequencer` keeps sequencer notes separate from played ones, as in the firmware: a key is only

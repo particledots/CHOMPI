@@ -152,6 +152,16 @@ bool WT8Engine::loadWavetable(int index, const void* wavData, size_t numBytes)
     return false;
 }
 
+bool WT8Engine::setTableData(int index, const float* data, size_t numFloats)
+{
+    if (index < 0 || index >= kNumTables || data == nullptr || numFloats != kTableFloats)
+        return false;
+    std::memcpy(&impl_->tables[(size_t)index * kTableFloats], data, kTableFloats * sizeof(float));
+    if (index + 1 > impl_->loader->numWavetables)
+        impl_->loader->numWavetables = (int16_t)(index + 1);
+    return true;
+}
+
 void WT8Engine::setParams(const Params& p)
 {
     impl_->params = p;

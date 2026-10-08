@@ -1,5 +1,8 @@
 // Drives the real WT8 AudioProcessor the way a host would (no GUI, no audio device).
 #include "PluginProcessor.h"
+#include "WavetableImport.h"
+#include <cstring>
+#include <limits>
 #include <cstdio>
 #include <cmath>
 #include <memory>
@@ -838,7 +841,231 @@ int main()
         printf("v0.9 copy slot + starter presets + modified marker: %s\n", v9Ok ? "ok" : "FAILED");
     }
 
-    bool ok = seqOk && v4Ok && v5Ok && v6Ok && v8Ok && v9Ok && finite && peak > 0.02f && peak <= 1.5f && held > 0.005f && tail < held * 0.05f && std::fabs(cutoff - 0.2f) < 0.01f;
+    // ---- v0.10 user wavetables (LOAD): import / convert, engine hand-off, saved with the project ----
+    bool v10Ok = true;
+    {
+        auto check = [&](bool cond, const char* what) { printf("  %s: %s\n", cond ? "ok  " : "FAIL", what); v10Ok = v10Ok && cond; };
+        auto setPlain = [](WT8AudioProcessor& pr, const char* id, float plain) {
+            auto* pp = dynamic_cast<juce::RangedAudioParameter*>(pr.apvts.getParameter(id));
+            pp->setValueNotifyingHost(pp->convertTo0to1(plain));
+        };
+        // minimal WAV writers
+        auto wavBytes = [](int code, int bits, int ch, const std::vector<double>& v, const char* extraChunk = nullptr) {
+            std::vector<uint8_t> d;
+            auto p16 = [&](int x) { d.push_back((uint8_t) (x & 255)); d.push_back((uint8_t) ((x >> 8) & 255)); };
+            auto p32 = [&](uint32_t x) { for (int i = 0; i < 4; ++i) d.push_back((uint8_t) ((x >> (8 * i)) & 255)); };
+            auto tag = [&](const char* t) { for (int i = 0; i < 4; ++i) d.push_back((uint8_t) t[i]); };
+            std::vector<uint8_t> pay;
+            for (double x : v)
+            {
+                if (code == 3) { float f = (float) x; uint8_t b4[4]; std::memcpy(b4, &f, 4); pay.insert(pay.end(), b4, b4 + 4); }
+                else if (bits == 16) { int q = (int) std::lround(x * 32767); pay.push_back((uint8_t) (q & 255)); pay.push_back((uint8_t) ((q >> 8) & 255)); }
+                else { int q = (int) std::lround(x * 8388607); pay.push_back((uint8_t) (q & 255)); pay.push_back((uint8_t) ((q >> 8) & 255)); pay.push_back((uint8_t) ((q >> 16) & 255)); }
+            }
+            tag("RIFF"); p32(0); tag("WAVE");
+            tag("fmt "); p32(16); p16(code); p16(ch); p32(44100); p32((uint32_t) (44100 * ch * bits / 8)); p16(ch * bits / 8); p16(bits);
+            if (extraChunk != nullptr) { tag("clm "); const uint32_t n = (uint32_t) std::strlen(extraChunk); p32(n); for (uint32_t i = 0; i < n; ++i) d.push_back((uint8_t) extraChunk[i]); if (n & 1) d.push_back(0); }
+            tag("data"); p32((uint32_t) pay.size()); d.insert(d.end(), pay.begin(), pay.end());
+            const uint32_t total = (uint32_t) d.size() - 8;
+            for (int i = 0; i < 4; ++i) d[4 + (size_t) i] = (uint8_t) ((total >> (8 * i)) & 255);
+            return d;
+        };
+        const double twoPi = 6.283185307179586;
+
+        // ---- the importer on its own ----
+        {
+            std::vector<float> out; std::string note, err;
+            auto stats = [&](const std::vector<float>& t, float& peak, float& maxDc, bool& fin) {
+                peak = 0; maxDc = 0; fin = true;
+                for (int f = 0; f < wtimport::kFrames; ++f) { double m = 0; for (int i = 0; i < wtimport::kFrameSize; ++i) { const float v = t[(size_t) f * wtimport::kFrameSize + (size_t) i]; if (!std::isfinite(v)) fin = false; peak = std::fmax(peak, std::fabs(v)); m += v; } maxDc = (float) std::fmax(maxDc, std::fabs(m / wtimport::kFrameSize)); }
+            };
+            float pk, dc; bool fin;
+
+            std::vector<float> one(1024); for (size_t i = 0; i < one.size(); ++i) one[i] = (float) (std::sin(twoPi * (double) i / 1024.0) + 0.3 + 0.2 * std::sin(3 * twoPi * (double) i / 1024.0));
+            check(wtimport::convertToTable(one, 0, out, note, err) && out.size() == (size_t) wtimport::kTableFloats, "a single 1024-sample cycle converts");
+            stats(out, pk, dc, fin);
+            check(fin && std::fabs(pk - 0.9f) < 1e-4f && dc < 1e-5f, "...peak 0.9, no DC in any frame, all finite");
+            bool same = true; for (int i = 0; i < wtimport::kFrameSize; ++i) if (out[(size_t) i] != out[(size_t) 32 * wtimport::kFrameSize + (size_t) i]) same = false;
+            check(same && note.find("single cycle") != std::string::npos, "...a single cycle is the same in all 33 frames, and the note says so");
+
+            // 64 frames of 2048: frame f is a sine with f+1 periods (very different frames)
+            std::vector<float> many(64 * 2048);
+            for (int f = 0; f < 64; ++f) for (int i = 0; i < 2048; ++i) many[(size_t) f * 2048 + (size_t) i] = (float) (0.5 * std::sin(twoPi * (f + 1) * i / 2048.0));
+            check(wtimport::convertToTable(many, 0, out, note, err), "64 frames of 2048 convert");
+            auto corr = [&](const float* a, const float* b) { double ma = 0, mb = 0; for (int i = 0; i < 2048; ++i) { ma += a[i]; mb += b[i]; } ma /= 2048; mb /= 2048; double ab = 0, aa = 0, bb = 0; for (int i = 0; i < 2048; ++i) { ab += (a[i] - ma) * (b[i] - mb); aa += (a[i] - ma) * (a[i] - ma); bb += (b[i] - mb) * (b[i] - mb); } return ab / std::sqrt(aa * bb); };
+            check(corr(&out[0], &many[0]) > 0.9999 && corr(&out[32 * 2048], &many[63 * 2048]) > 0.9999, "...the first and last frame of the file are the first and last frame of the table");
+            stats(out, pk, dc, fin);
+            check(fin && std::fabs(pk - 0.9f) < 1e-4f, "...peak 0.9");
+
+            std::vector<float> exact33(33 * 2048); for (size_t i = 0; i < exact33.size(); ++i) exact33[i] = (float) (0.4 * std::sin(0.01 * (double) i));
+            check(wtimport::convertToTable(exact33, 0, out, note, err) && corr(&out[5 * 2048], &exact33[5 * 2048]) > 0.9999 && corr(&out[20 * 2048], &exact33[20 * 2048]) > 0.9999, "exactly 33 frames: every frame is kept as it is (apart from level)");
+
+            // frames of another size announced by a hint
+            std::vector<float> f1024(10 * 1024); for (size_t i = 0; i < f1024.size(); ++i) f1024[i] = (float) std::sin(twoPi * (double) (i % 1024) / 1024.0 * (1 + (double) (i / 1024)));
+            check(wtimport::convertToTable(f1024, 1024, out, note, err) && note.find("10 frames of 1024") != std::string::npos, "a frame-size hint (from a clm chunk) of 1024 reads 10 frames");
+
+            // a recording is cut into 33 parts
+            std::vector<float> rec(100000); for (size_t i = 0; i < rec.size(); ++i) rec[i] = (float) (std::sin(0.05 * (double) i) * std::sin(0.0002 * (double) i));
+            check(wtimport::convertToTable(rec, 0, out, note, err) && note.find("33 equal parts") != std::string::npos, "an odd-length recording is cut into 33 parts");
+            stats(out, pk, dc, fin);
+            check(fin && std::fabs(pk - 0.9f) < 1e-4f && dc < 1e-5f, "...peak 0.9, no DC");
+
+            std::vector<float> bad(5000, 0.f);
+            check(!wtimport::convertToTable(bad, 0, out, note, err) && err.find("silent") != std::string::npos, "a silent file is refused");
+            std::vector<float> tiny(10, 0.5f);
+            check(!wtimport::convertToTable(tiny, 0, out, note, err), "a file with fewer than 64 samples is refused");
+            std::vector<float> nan(8192, std::numeric_limits<float>::quiet_NaN()); nan[100] = 0.5f; nan[4000] = -0.5f;
+            check(wtimport::convertToTable(nan, 0, out, note, err), "NaN samples in a file do not break the conversion");
+            stats(out, pk, dc, fin);
+            check(fin, "...and the table is finite");
+        }
+
+        // ---- reading WAV files ----
+        {
+            std::vector<float> m; int sr = 0, clm = 0; std::string err;
+            std::vector<double> st; for (int i = 0; i < 100; ++i) { st.push_back(0.5); st.push_back(-0.25); }
+            auto w16 = wavBytes(1, 16, 2, st);
+            check(wtimport::readWav(w16.data(), w16.size(), m, sr, clm, err) && m.size() == 100 && std::fabs(m[0] - 0.125f) < 1e-3f && sr == 44100, "16-bit stereo is read and mixed to mono");
+            auto w24 = wavBytes(1, 24, 1, {0.5, -0.5, 0.25});
+            check(wtimport::readWav(w24.data(), w24.size(), m, sr, clm, err) && m.size() == 3 && std::fabs(m[1] + 0.5f) < 1e-5f, "24-bit mono is read");
+            auto wf = wavBytes(3, 32, 1, {0.5, -0.5, 0.25, 1.5});
+            check(wtimport::readWav(wf.data(), wf.size(), m, sr, clm, err) && m.size() == 4 && m[3] == 1.5f, "32-bit float is read as it is");
+            auto wc = wavBytes(3, 32, 1, {0.1, 0.2}, "<!>2048 10000000 wavetable (test)");
+            check(wtimport::readWav(wc.data(), wc.size(), m, sr, clm, err) && clm == 2048, "a Serum-style clm chunk gives the frame size");
+            auto wn = wavBytes(3, 32, 1, {0.1, 0.2}, "no marker here");
+            check(wtimport::readWav(wn.data(), wn.size(), m, sr, clm, err) && clm == 0, "a clm chunk without the marker is ignored");
+            check(!wtimport::readWav(w16.data(), 20, m, sr, clm, err), "a truncated header is refused");
+            std::vector<uint8_t> junk(500, 0x41);
+            check(!wtimport::readWav(junk.data(), junk.size(), m, sr, clm, err) && err.find("not a WAV") != std::string::npos, "a file that is not a WAV is refused");
+            auto wcut = w16; wcut.resize(wcut.size() - 7);
+            check(wtimport::readWav(wcut.data(), wcut.size(), m, sr, clm, err) && m.size() >= 98, "a file cut short is read as far as it goes");
+        }
+
+        // ---- through the real processor ----
+        {
+            const auto dir = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("ipmohc_table_test_" + juce::String(juce::Random::getSystemRandom().nextInt64()));
+            dir.createDirectory();
+            // a table that sounds unlike any built-in one: frame f is a stack of f+1 harmonics falling as 1/h^2
+            std::vector<double> tab; tab.reserve(33 * 2048);
+            for (int f = 0; f < 33; ++f) for (int i = 0; i < 2048; ++i) { double v = 0; for (int h = 1; h <= 1 + f; ++h) v += std::sin(twoPi * h * i / 2048.0) / (h * h); tab.push_back(0.8 * v); }
+            auto tb = wavBytes(3, 32, 1, tab);
+            const auto goodFile = dir.getChildFile("My Table.wav");
+            goodFile.replaceWithData(tb.data(), tb.size());
+            const auto junkFile = dir.getChildFile("junk.wav");
+            { std::vector<uint8_t> j(300, 7); junkFile.replaceWithData(j.data(), j.size()); }
+            const auto silentFile = dir.getChildFile("silent.wav");
+            { auto sb = wavBytes(3, 32, 1, std::vector<double>(4096, 0.0)); silentFile.replaceWithData(sb.data(), sb.size()); }
+
+            auto makeProc = [&]() {
+                auto pr = std::make_unique<WT8AudioProcessor>();
+                pr->setPlayConfigDetails(0, 2, sr, bs); pr->prepareToPlay(sr, bs);
+                setPlain(*pr, "table", 3); setPlain(*pr, "cycle", 20);
+                return pr;
+            };
+            // renders `blocks` blocks (left channel), a C3 is struck in the first one when noteOn
+            auto render = [&](WT8AudioProcessor& pr, int blocks, bool noteOn) {
+                juce::AudioBuffer<float> b(2, bs);
+                std::vector<float> out;
+                for (int blk = 0; blk < blocks; ++blk)
+                {
+                    juce::MidiBuffer mb;
+                    if (noteOn && blk == 0) mb.addEvent(juce::MidiMessage::noteOn(1, 60, (juce::uint8) 100), 0);
+                    b.clear(); pr.processBlock(b, mb);
+                    for (int i = 0; i < bs; ++i) out.push_back(b.getSample(0, i));
+                }
+                return out;
+            };
+            auto maxDiff = [](const std::vector<float>& a, const std::vector<float>& c) { float m = 0; for (size_t i = 0; i < a.size() && i < c.size(); ++i) m = std::fmax(m, std::fabs(a[i] - c[i])); return m; };
+            auto peakOf = [](const std::vector<float>& a) { float m = 0; for (float v : a) m = std::fmax(m, std::fabs(v)); return m; };
+            auto finiteAll = [](const std::vector<float>& a) { for (float v : a) if (!std::isfinite(v)) return false; return true; };
+            juce::String msg;
+
+            auto ref = makeProc();
+            const auto builtin = render(*ref, 40, true);
+            check(peakOf(builtin) > 0.01f, "set-up: the built-in table 3 sounds");
+            juce::MemoryBlock stBuiltin; ref->getStateInformation(stBuiltin);
+
+            auto p = makeProc();
+            check(!p->slotHasUserTable(2) && p->userTableName(2).isEmpty(), "no user table at the start");
+            check(!p->loadUserTable(2, dir.getChildFile("nothing.wav"), msg) && msg.isNotEmpty(), "a file that does not exist is refused, with a message");
+            check(!p->loadUserTable(2, junkFile, msg) && !p->slotHasUserTable(2), "a file that is not a WAV is refused, nothing changes");
+            check(!p->loadUserTable(2, silentFile, msg) && !p->slotHasUserTable(2), "a silent WAV is refused, nothing changes");
+            check(!p->loadUserTable(9, goodFile, msg) && !p->loadUserTable(-1, goodFile, msg), "slot numbers out of range are refused");
+            check(maxDiff(render(*p, 40, true), builtin) < 1e-6f, "...and the sound is still the built-in table's");
+
+            auto q = makeProc();
+            check(q->loadUserTable(2, goodFile, msg) && q->slotHasUserTable(2) && q->userTableName(2) == "My Table" && !q->slotHasUserTable(1), "a good file loads into slot 3 only; its name is kept");
+            const auto loaded = render(*q, 40, true);
+            check(finiteAll(loaded) && peakOf(loaded) > 0.01f && maxDiff(loaded, builtin) > 0.02f, "...table 3 now sounds different (and finite)");
+
+            auto q2 = makeProc();
+            q2->loadUserTable(2, goodFile, msg); q2->resetUserTable(2);
+            check(!q2->slotHasUserTable(2) && q2->userTableName(2).isEmpty(), "RESET: the slot is built-in again");
+            check(maxDiff(render(*q2, 40, true), builtin) < 1e-6f, "...and it sounds exactly as the built-in table did");
+
+            auto h = makeProc();
+            const auto first = render(*h, 20, true);
+            h->loadUserTable(2, goodFile, msg);
+            const auto second = render(*h, 20, false);
+            check(finiteAll(first) && finiteAll(second) && peakOf(second) > 0.01f, "loading while a note is held: still sounding, all finite");
+
+            // a new engine (prepareToPlay again, e.g. the host changes the sample rate) keeps the table
+            q->prepareToPlay(sr, bs);
+            check(q->slotHasUserTable(2) && maxDiff(render(*q, 40, true), loaded) < 1e-6f, "after prepareToPlay the loaded table is still used");
+
+            // saved with the project
+            juce::MemoryBlock st; q->getStateInformation(st);
+            printf("    (project state with one loaded table: %.0f KB, without: %.0f KB)\n", (double) st.getSize() / 1024.0, (double) stBuiltin.getSize() / 1024.0);
+            auto r = makeProc();
+            r->setStateInformation(st.getData(), (int) st.getSize());
+            check(r->slotHasUserTable(2) && r->userTableName(2) == "My Table" && !r->slotHasUserTable(0), "a project brings its table and its name back");
+            check(maxDiff(render(*r, 40, true), loaded) < 1e-6f, "...and it sounds the same as when it was saved");
+
+            auto s = makeProc();
+            s->loadUserTable(2, goodFile, msg); s->loadUserTable(5, goodFile, msg);
+            render(*s, 4, false);
+            s->setStateInformation(stBuiltin.getData(), (int) stBuiltin.getSize());
+            check(!s->slotHasUserTable(2) && !s->slotHasUserTable(5), "opening a project without loaded tables takes the loaded ones away");
+            auto control = makeProc(); render(*control, 4, false);   // same history (4 idle blocks), but never had a loaded table
+            check(maxDiff(render(*s, 40, true), render(*control, 40, true)) < 1e-6f, "...and the built-in tables sound again, exactly as in a plugin that never had one");
+
+            // malformed saved tables are ignored (built-in table stays), and NaN data is made safe
+            struct Access : WT8AudioProcessor { using juce::AudioProcessor::copyXmlToBinary; using juce::AudioProcessor::getXmlFromBinary; };
+            auto stateWith = [&](const juce::String& value) {
+                auto xml = Access::getXmlFromBinary(st.getData(), (int) st.getSize());
+                xml->setAttribute("utab2", value);
+                juce::MemoryBlock mb; Access::copyXmlToBinary(*xml, mb); return mb;
+            };
+            {
+                auto bad = stateWith("AAAA");
+                auto u = makeProc();
+                u->setStateInformation(bad.getData(), (int) bad.getSize());
+                check(!u->slotHasUserTable(2) && maxDiff(render(*u, 40, true), builtin) < 1e-6f, "a saved table of the wrong size is ignored");
+                auto bad2 = stateWith("this is not base64 !!!");
+                u->setStateInformation(bad2.getData(), (int) bad2.getSize());
+                check(!u->slotHasUserTable(2), "a saved table that is not base64 is ignored");
+                std::vector<float> nanTab((size_t) wtimport::kTableFloats, std::numeric_limits<float>::quiet_NaN());
+                for (size_t i = 0; i < nanTab.size(); i += 2) nanTab[i] = 0.3f * (float) std::sin(0.02 * (double) i);
+                auto nanState = stateWith(juce::Base64::toBase64(nanTab.data(), nanTab.size() * sizeof(float)));
+                u->setStateInformation(nanState.getData(), (int) nanState.getSize());
+                const auto nanOut = render(*u, 20, true);
+                check(u->slotHasUserTable(2) && finiteAll(nanOut), "a saved table with NaN values is accepted but made finite");
+            }
+            // two loaded tables in different slots, both come back
+            {
+                auto two = makeProc();
+                two->loadUserTable(0, goodFile, msg); two->loadUserTable(6, goodFile, msg);
+                juce::MemoryBlock st2; two->getStateInformation(st2);
+                auto three = makeProc();
+                three->setStateInformation(st2.getData(), (int) st2.getSize());
+                check(three->slotHasUserTable(0) && three->slotHasUserTable(6) && !three->slotHasUserTable(3), "tables in several slots all come back");
+            }
+            dir.deleteRecursively();
+        }
+        printf("v0.10 user wavetables: %s\n", v10Ok ? "ok" : "FAILED");
+    }
+
+    bool ok = seqOk && v4Ok && v5Ok && v6Ok && v8Ok && v9Ok && v10Ok && finite && peak > 0.02f && peak <= 1.5f && held > 0.005f && tail < held * 0.05f && std::fabs(cutoff - 0.2f) < 0.01f;
     printf(ok ? "PASS\n" : "FAIL\n");
     return ok ? 0 : 1;
 }

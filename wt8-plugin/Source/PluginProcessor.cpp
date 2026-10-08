@@ -2,7 +2,9 @@
 #include "WT8Engine.h"
 #include "PluginEditor.h"
 #include "StarterPresets.h"
+#include "WavetableImport.h"
 #include <cmath>
+#include <cstring>
 #include <limits>
 #include <BinaryData.h>
 
@@ -98,6 +100,7 @@ WT8AudioProcessor::WT8AudioProcessor()
     : AudioProcessor(BusesProperties().withOutput("Output", juce::AudioChannelSet::stereo(), true)),
       apvts(*this, nullptr, "WT8", createLayout())
 {
+    for (auto& f : handoffFlag_) f.store(false);
 }
 
 WT8AudioProcessor::~WT8AudioProcessor() = default;
@@ -125,12 +128,109 @@ void WT8AudioProcessor::loadWavetables(WT8Engine& e)
     }
 }
 
+bool WT8AudioProcessor::builtinTableData(int slot, std::vector<float>& out) const
+{
+    const char* data[] = {BinaryData::wavetable01_wav, BinaryData::wavetable02_wav, BinaryData::wavetable03_wav,
+                          BinaryData::wavetable04_wav, BinaryData::wavetable05_wav, BinaryData::wavetable06_wav,
+                          BinaryData::wavetable07_wav};
+    const int sizes[] = {BinaryData::wavetable01_wavSize, BinaryData::wavetable02_wavSize,
+                         BinaryData::wavetable03_wavSize, BinaryData::wavetable04_wavSize,
+                         BinaryData::wavetable05_wavSize, BinaryData::wavetable06_wavSize,
+                         BinaryData::wavetable07_wavSize};
+    if (slot < 0 || slot >= kTableSlots) return false;
+    return wtimport::readRawTable(reinterpret_cast<const uint8_t*>(data[slot]), (size_t) sizes[slot], out);
+}
+
+void WT8AudioProcessor::setSlotData(int slot, const std::vector<float>& data)
+{
+    const juce::SpinLock::ScopedLockType sl(handoffLock_);
+    handoff_[slot] = data;
+    handoffFlag_[slot].store(true);
+    handoffAny_.store(true);
+}
+
+void WT8AudioProcessor::applyPendingTables()
+{
+    if (!handoffAny_.load() || !handoffLock_.tryEnter())
+        return; // busy: the next block picks it up
+    for (int i = 0; i < kTableSlots; ++i)
+        if (handoffFlag_[i].load())
+        {
+            engine_->setTableData(i, handoff_[i].data(), handoff_[i].size());
+            handoffFlag_[i].store(false);
+        }
+    handoffAny_.store(false);
+    handoffLock_.exit();
+}
+
+bool WT8AudioProcessor::slotHasUserTable(int slot) const
+{
+    if (slot < 0 || slot >= kTableSlots) return false;
+    const juce::ScopedLock sl(userLock_);
+    return !userTable_[slot].empty();
+}
+
+juce::String WT8AudioProcessor::userTableName(int slot) const
+{
+    if (slot < 0 || slot >= kTableSlots) return {};
+    const juce::ScopedLock sl(userLock_);
+    return userName_[slot];
+}
+
+bool WT8AudioProcessor::loadUserTable(int slot, const juce::File& file, juce::String& message)
+{
+    if (slot < 0 || slot >= kTableSlots) { message = "No such table slot."; return false; }
+    if (!file.existsAsFile()) { message = "The file does not exist."; return false; }
+    if (file.getSize() > 64 * 1024 * 1024) { message = "The file is larger than 64 MB."; return false; }
+    juce::MemoryBlock mb;
+    if (!file.loadFileAsData(mb)) { message = "The file could not be read."; return false; }
+    std::vector<float> mono, table;
+    int sr = 0, clm = 0;
+    std::string err, note;
+    if (!wtimport::readWav(static_cast<const uint8_t*>(mb.getData()), mb.getSize(), mono, sr, clm, err)
+        || !wtimport::convertToTable(mono, clm, table, note, err))
+    {
+        message = juce::String(err) + ". Only WAV files can be loaded.";
+        return false;
+    }
+    {
+        const juce::ScopedLock sl(userLock_);
+        userTable_[slot] = table;
+        userName_[slot] = file.getFileNameWithoutExtension().substring(0, 40);
+    }
+    setSlotData(slot, table);
+    message = juce::String(note);
+    return true;
+}
+
+void WT8AudioProcessor::resetUserTable(int slot)
+{
+    if (slot < 0 || slot >= kTableSlots) return;
+    std::vector<float> builtin;
+    {
+        const juce::ScopedLock sl(userLock_);
+        if (userTable_[slot].empty()) return;
+        userTable_[slot].clear();
+        userName_[slot] = juce::String();
+    }
+    if (builtinTableData(slot, builtin)) setSlotData(slot, builtin);
+}
+
 void WT8AudioProcessor::prepareToPlay(double sampleRate, int)
 {
     sampleRate_ = sampleRate;
     engineReady_ = false;
     auto fresh = std::make_unique<WT8Engine>(sampleRate);
     loadWavetables(*fresh);
+    {
+        // user tables go into the new engine straight away; anything still waiting in the hand-off is then out of date
+        const juce::ScopedLock sl(userLock_);
+        for (int i = 0; i < kTableSlots; ++i)
+            if (!userTable_[i].empty()) fresh->setTableData(i, userTable_[i].data(), userTable_[i].size());
+        const juce::SpinLock::ScopedLockType hl(handoffLock_);
+        for (auto& fl : handoffFlag_) fl.store(false);
+        handoffAny_.store(false);
+    }
     engine_ = std::move(fresh);
     engineReady_ = true;
     seq_.resetTransport();
@@ -143,6 +243,8 @@ void WT8AudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
     buffer.clear();
     if (!engineReady_ || buffer.getNumChannels() < 2)
         return;
+
+    applyPendingTables();
 
     WT8Engine::Params p;
     p.table          = (int) *apvts.getRawParameterValue("table") - 1;
@@ -272,6 +374,25 @@ void WT8AudioProcessor::getStateInformation(juce::MemoryBlock& destData)
         }
         apvts.state.setProperty("patCur", slotCur_, nullptr);
     }
+    {
+        // v0.10 user wavetables: utab<n> = the table's 67,584 floats (little-endian) as base64, utabn<n> = its name.
+        // A project without them (older version, or no table loaded) comes back with the built-in tables.
+        const juce::ScopedLock sl(userLock_);
+        for (int i = 0; i < kTableSlots; ++i)
+        {
+            const juce::Identifier id("utab" + juce::String(i)), nid("utabn" + juce::String(i));
+            if (!userTable_[i].empty())
+            {
+                apvts.state.setProperty(id, juce::Base64::toBase64(userTable_[i].data(), userTable_[i].size() * sizeof(float)), nullptr);
+                apvts.state.setProperty(nid, userName_[i], nullptr);
+            }
+            else
+            {
+                apvts.state.removeProperty(id, nullptr);
+                apvts.state.removeProperty(nid, nullptr);
+            }
+        }
+    }
     if (auto xml = apvts.copyState().createXml())
         copyXmlToBinary(*xml, destData);
 }
@@ -292,6 +413,33 @@ void WT8AudioProcessor::setStateInformation(const void* data, int sizeInBytes)
                     slots_[i] = i == slotCur_ ? std::string() : apvts.state.getProperty(juce::Identifier("pat" + juce::String(i))).toString().toStdString();
             }
             setSeqTranspose((int) apvts.state.getProperty("transpose", 0)); // states saved before v0.5 have none: 0
+            for (int i = 0; i < kTableSlots; ++i)
+            {
+                // v0.10 user wavetables (see getStateInformation); anything missing or malformed leaves the built-in table
+                std::vector<float> t;
+                const juce::String text = apvts.state.getProperty(juce::Identifier("utab" + juce::String(i))).toString();
+                if (text.isNotEmpty())
+                {
+                    juce::MemoryOutputStream mo;
+                    if (juce::Base64::convertFromBase64(mo, text) && mo.getDataSize() == (size_t) wtimport::kTableFloats * sizeof(float))
+                    {
+                        t.resize((size_t) wtimport::kTableFloats);
+                        std::memcpy(t.data(), mo.getData(), mo.getDataSize());
+                        for (float& v : t) if (!std::isfinite(v)) v = 0.f;
+                    }
+                }
+                if (!t.empty())
+                {
+                    {
+                        const juce::ScopedLock ul(userLock_);
+                        userTable_[i] = t;
+                        userName_[i] = apvts.state.getProperty(juce::Identifier("utabn" + juce::String(i))).toString().substring(0, 40);
+                    }
+                    setSlotData(i, t);
+                }
+                else
+                    resetUserTable(i);
+            }
             {
                 // v0.9: the sound came back with the project, not from a preset, so no preset is current any more
                 const juce::ScopedLock sl(presetLock_);

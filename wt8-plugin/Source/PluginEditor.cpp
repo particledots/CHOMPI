@@ -703,6 +703,7 @@ WT8Editor::WT8Editor(WT8AudioProcessor& p) : juce::AudioProcessorEditor(&p), pro
 {
     setLookAndFeel(&laf_);
     auto& table   = addKnob("table",  "WAVETABLE", Kind::Int);
+    tableKnob_ = &table; // (before the first resized(), which places the LOAD / RESET buttons under it)
     auto& frame   = addKnob("cycle",  "FRAME",     Kind::Int);
     auto& octave  = addKnob("octave", "OCTAVE",    Kind::Octave, true);
     auto& pitch   = addKnob("pitch",  "PITCH",     Kind::Pitch,  true);
@@ -880,12 +881,21 @@ WT8Editor::WT8Editor(WT8AudioProcessor& p) : juce::AudioProcessorEditor(&p), pro
     setSize(840, 898);
     grid_.refresh();
     timerCallback(); // fill in the transpose readout and scale state straight away
+    // v0.10: LOAD / RESET under the WAVETABLE knob
+    for (auto* b : {&loadTableBtn_, &resetTableBtn_}) addAndMakeVisible(*b);
+    loadTableBtn_.onClick = [this] { loadTableFromFile(); };
+    resetTableBtn_.onClick = [this] {
+        proc_.resetUserTable(juce::jlimit(0, WT8AudioProcessor::kTableSlots - 1, juce::roundToInt(proc_.apvts.getRawParameterValue("table")->load()) - 1));
+        refreshTableControls();
+    };
+    refreshTableControls();
     startTimerHz(15);
 }
 
 void WT8Editor::timerCallback()
 {
     grid_.refresh();
+    refreshTableControls();
     recBtn_.setToggleState(proc_.isSeqRecording(), juce::dontSendNotification);
     playBtn_.setEnabled(syncBox_.getSelectedItemIndex() == 0); // in "Logic" sync, Logic's transport is the play button
     pendBtn_.setEnabled(dirBox_.getSelectedItemIndex() == 2);  // end-repeat only applies to the pendulum
@@ -903,6 +913,42 @@ void WT8Editor::timerCallback()
     const bool xposeOn = xposeBtn_.getToggleState();
     xposeReadout_.setText((xp > 0 ? "+" : "") + juce::String(xp) + " st", juce::dontSendNotification);
     xposeReadout_.setColour(juce::Label::textColourId, xposeOn ? kAccent : kDim);
+}
+
+// ---- v0.10 user wavetables -------------------------------------------------------------------------------------------
+void WT8Editor::refreshTableControls()
+{
+    const int slot = juce::jlimit(0, WT8AudioProcessor::kTableSlots - 1, juce::roundToInt(proc_.apvts.getRawParameterValue("table")->load()) - 1);
+    const bool user = proc_.slotHasUserTable(slot);
+    const juce::String label = user ? "USER: " + proc_.userTableName(slot) : juce::String("WAVETABLE");
+    if (label != shownTableLabel_ && tableKnob_ != nullptr)
+    {
+        shownTableLabel_ = label;
+        tableKnob_->name.setText(label, juce::dontSendNotification);
+        tableKnob_->name.setColour(juce::Label::textColourId, user ? kAccent : kDim);
+    }
+    resetTableBtn_.setEnabled(user);
+}
+
+void WT8Editor::loadTableFromFile()
+{
+    const int slot = juce::jlimit(0, WT8AudioProcessor::kTableSlots - 1, juce::roundToInt(proc_.apvts.getRawParameterValue("table")->load()) - 1);
+    tableChooser_ = std::make_unique<juce::FileChooser>("Load a wavetable (WAV file) into table " + juce::String(slot + 1),
+                                                        juce::File(), "*.wav");
+    juce::Component::SafePointer<WT8Editor> safe(this);
+    tableChooser_->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
+                               [safe, slot](const juce::FileChooser& fc) {
+        if (safe == nullptr) return;
+        const juce::File f = fc.getResult();
+        if (!f.existsAsFile()) return; // cancelled
+        juce::String msg;
+        const bool ok = safe->proc_.loadUserTable(slot, f, msg);
+        safe->refreshTableControls();
+        juce::AlertWindow::showMessageBoxAsync(ok ? juce::MessageBoxIconType::InfoIcon : juce::MessageBoxIconType::WarningIcon,
+                                               ok ? "Wavetable loaded" : "Could not load the wavetable",
+                                               ok ? "Table " + juce::String(slot + 1) + " now holds \"" + f.getFileNameWithoutExtension() + "\": " + msg + "."
+                                                  : msg);
+    });
 }
 
 // ---- v0.9 pattern slots --------------------------------------------------------------------------------------------
@@ -1187,6 +1233,18 @@ void WT8Editor::resized()
     area.removeFromTop(gap);
     layoutRow(row1_, row1);
     layoutRow(row2_, area);
+
+    // v0.10: LOAD / RESET sit under the WAVETABLE knob (its slider gives up the space)
+    if (tableKnob_ != nullptr)
+    {
+        auto b = tableKnob_->slider.getBounds();
+        auto strip = b.removeFromBottom(int(26 * scale));
+        tableKnob_->slider.setBounds(b);
+        const int bw = (strip.getWidth() - int(6 * scale)) / 2;
+        loadTableBtn_.setBounds(strip.removeFromLeft(bw).reduced(0, int(1 * scale)));
+        strip.removeFromLeft(int(6 * scale));
+        resetTableBtn_.setBounds(strip.reduced(0, int(1 * scale)));
+    }
 
     // ---- sequencer strip ----
     full.removeFromTop(gap);
