@@ -177,9 +177,10 @@ juce::String WT8AudioProcessor::userTableName(int slot) const
     return userName_[slot];
 }
 
-bool WT8AudioProcessor::loadUserTable(int slot, const juce::File& file, juce::String& message)
+bool WT8AudioProcessor::loadUserTable(int slot, const juce::File& file, juce::String& message, int frameSize)
 {
     if (slot < 0 || slot >= kTableSlots) { message = "No such table slot."; return false; }
+    if (frameSize != 0 && (frameSize < 64 || frameSize > 16384)) { message = "The frame size must be between 64 and 16384 samples."; return false; }
     if (!file.existsAsFile()) { message = "The file does not exist."; return false; }
     if (file.getSize() > 64 * 1024 * 1024) { message = "The file is larger than 64 MB."; return false; }
     juce::MemoryBlock mb;
@@ -187,8 +188,9 @@ bool WT8AudioProcessor::loadUserTable(int slot, const juce::File& file, juce::St
     std::vector<float> mono, table;
     int sr = 0, clm = 0;
     std::string err, note;
+    // a frame size chosen by the person wins over the file's own marker; 0 = Auto (marker, else the rules in WavetableImport.h)
     if (!wtimport::readWav(static_cast<const uint8_t*>(mb.getData()), mb.getSize(), mono, sr, clm, err)
-        || !wtimport::convertToTable(mono, clm, table, note, err))
+        || !wtimport::convertToTable(mono, frameSize > 0 ? frameSize : clm, table, note, err))
     {
         message = juce::String(err) + ". Only WAV files can be loaded.";
         return false;

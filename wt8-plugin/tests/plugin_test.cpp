@@ -1060,6 +1060,65 @@ int main()
                 three->setStateInformation(st2.getData(), (int) st2.getSize());
                 check(three->slotHasUserTable(0) && three->slotHasUserTable(6) && !three->slotHasUserTable(3), "tables in several slots all come back");
             }
+
+            // ---- v0.11: frame-size option for LOAD ----
+            {
+                // 16 frames of 1024 samples, frame f = sine with f+1 periods; once without and once with a Serum-style marker
+                std::vector<double> f1k; f1k.reserve(16 * 1024);
+                for (int f = 0; f < 16; ++f) for (int i = 0; i < 1024; ++i) f1k.push_back(0.6 * std::sin(twoPi * (f + 1) * i / 1024.0) + 0.2 * std::sin(twoPi * 2 * (f + 1) * i / 1024.0));
+                auto noMarker = wavBytes(3, 32, 1, f1k);
+                auto withMarker = wavBytes(3, 32, 1, f1k, "<!>1024 10000000 wavetable (test)");
+                const auto fNo = dir.getChildFile("k1024_nomarker.wav"), fClm = dir.getChildFile("k1024_marker.wav");
+                fNo.replaceWithData(noMarker.data(), noMarker.size());
+                fClm.replaceWithData(withMarker.data(), withMarker.size());
+
+                // importer: the hint decides how the file is cut into frames
+                std::vector<float> asFloat(f1k.begin(), f1k.end()), t1024, tAuto; std::string note, err;
+                auto corrN = [](const float* a, const float* b, int n) { double ma = 0, mb = 0; for (int i = 0; i < n; ++i) { ma += a[i]; mb += b[i]; } ma /= n; mb /= n; double ab = 0, aa = 0, bb = 0; for (int i = 0; i < n; ++i) { ab += (a[i] - ma) * (b[i] - mb); aa += (a[i] - ma) * (a[i] - ma); bb += (b[i] - mb) * (b[i] - mb); } return ab / std::sqrt(aa * bb); };
+                check(wtimport::convertToTable(asFloat, 1024, t1024, note, err) && note.find("16 frames of 1024") != std::string::npos, "frame size 1024 reads the 16384-sample file as 16 frames");
+                // frame 0 / 32 of the table hold source frame 0 / 15 (resampled 1024 -> 2048, compare every second sample)
+                std::vector<float> a0(1024), a32(1024);
+                for (int i = 0; i < 1024; ++i) { a0[(size_t) i] = t1024[(size_t) (2 * i)]; a32[(size_t) i] = t1024[(size_t) 32 * 2048 + (size_t) (2 * i)]; }
+                check(corrN(a0.data(), &asFloat[0], 1024) > 0.9999 && corrN(a32.data(), &asFloat[15 * 1024], 1024) > 0.9999, "...first and last table frame are the file's first and last frame");
+                check(wtimport::convertToTable(asFloat, 0, tAuto, note, err) && note.find("8 frames of 2048") != std::string::npos, "without a hint the same file is read as 8 frames of 2048 (the mistake the option fixes)");
+                check(maxDiff(t1024, tAuto) > 0.1f, "...and the two tables differ");
+                std::vector<float> five(5000); for (size_t i = 0; i < five.size(); ++i) five[i] = (float) std::sin(0.03 * (double) i);
+                check(wtimport::convertToTable(five, 1024, t1024, note, err) && note.find("4 frames of 1024") != std::string::npos && note.find("last 904 samples") != std::string::npos, "a length that is not a whole number of frames: the left-over samples are named in the note");
+                std::vector<float> small(3000); for (size_t i = 0; i < small.size(); ++i) small[i] = (float) std::sin(0.03 * (double) i);
+                check(!wtimport::convertToTable(small, 4096, t1024, note, err) && err.find("shorter than one frame") != std::string::npos, "a frame size larger than the file is refused");
+
+                // processor
+                auto base = makeProc(); base->loadUserTable(2, goodFile, msg);
+                const auto baseSound = render(*base, 40, true);
+                auto auto2048 = makeProc();
+                check(auto2048->loadUserTable(2, goodFile, msg, 2048), "frame size 2048 on a 33 x 2048 file loads");
+                check(maxDiff(render(*auto2048, 40, true), baseSound) < 1e-6f, "...and sounds exactly like Auto (v0.10 behaviour)");
+
+                auto pn = makeProc(); pn->loadUserTable(2, fNo, msg, 0);
+                const auto soundNoAuto = render(*pn, 40, true);
+                auto pm = makeProc(); pm->loadUserTable(2, fNo, msg, 1024);
+                const auto soundNo1024 = render(*pm, 40, true);
+                auto pc = makeProc(); pc->loadUserTable(2, fClm, msg, 0);
+                const auto soundClmAuto = render(*pc, 40, true);
+                check(finiteAll(soundNo1024) && peakOf(soundNo1024) > 0.01f, "a 1024-frame file loaded with frame size 1024 sounds and is finite");
+                check(maxDiff(soundNo1024, soundNoAuto) > 0.02f, "...and differs from the Auto reading of the same file");
+                check(maxDiff(soundNo1024, soundClmAuto) < 1e-6f, "...and equals the file with a 1024 marker loaded on Auto");
+                auto po = makeProc(); po->loadUserTable(2, fClm, msg, 2048);
+                auto pq = makeProc(); pq->loadUserTable(2, fNo, msg, 2048);
+                check(maxDiff(render(*po, 40, true), render(*pq, 40, true)) < 1e-6f, "a chosen frame size beats the marker in the file");
+
+                auto bad = makeProc();
+                check(!bad->loadUserTable(2, goodFile, msg, 63) && !bad->loadUserTable(2, goodFile, msg, 16385) && !bad->loadUserTable(2, goodFile, msg, -5) && !bad->slotHasUserTable(2), "frame sizes outside 64..16384 are refused, nothing changes");
+                std::vector<double> shortWav(3000); for (size_t i = 0; i < shortWav.size(); ++i) shortWav[i] = 0.5 * std::sin(0.03 * (double) i);
+                auto shortBytes = wavBytes(3, 32, 1, shortWav);
+                const auto fShort = dir.getChildFile("short3000.wav"); fShort.replaceWithData(shortBytes.data(), shortBytes.size());
+                check(!bad->loadUserTable(2, fShort, msg, 4096) && !bad->slotHasUserTable(2) && msg.contains("shorter than one frame"), "a frame size larger than the file is refused with a message, nothing changes");
+                check(bad->loadUserTable(2, fNo, msg, 16384) && bad->slotHasUserTable(2), "a frame size equal to the whole file is one frame and loads (every table frame is then the same)");
+                // the loaded table is saved and restored whatever frame size was used
+                juce::MemoryBlock st3; pm->getStateInformation(st3);
+                auto back = makeProc(); back->setStateInformation(st3.getData(), (int) st3.getSize());
+                check(maxDiff(render(*back, 40, true), soundNo1024) < 1e-6f, "a table loaded with frame size 1024 comes back from the project unchanged");
+            }
             dir.deleteRecursively();
         }
         printf("v0.10 user wavetables: %s\n", v10Ok ? "ok" : "FAILED");

@@ -74,6 +74,8 @@ Under the WAVETABLE knob, **LOAD** puts a `.wav` file into the table slot the kn
 - anything else is treated as a recording and cut into 33 equal parts;
 - more or fewer than 33 frames are mapped onto 33 (the first and last stay as they are, the ones between are blended); each frame has its DC offset removed and the table is scaled to peak 0.9, like the built-in ones.
 
+After you pick the file, a small window asks for the **frame size** (v0.11): **Auto** (the default) does what is described above; 256, 512, 1024, 2048, 4096 or 8192 says how many samples one frame of the file has and overrides both the length rules and any `clm` marker. Use it when a table from another synth sounds like chopped-up audio because the file has no marker and its frames are not 2048 samples long. If the file length is not a whole number of frames, the left-over samples at the end are ignored (the alert says so).
+
 A loaded table is stored **inside the project** (about 350 KB per slot in the saved state), so the project does not depend on the file afterwards. A preset only stores the TABLE number, not the table. The engine still holds 7 tables (the firmware's limit), so a loaded table replaces one slot.
 
 ## Wavetable maker (tools/make_wavetables.py)

@@ -97,8 +97,9 @@ class WT8AudioProcessor : public juce::AudioProcessor
     // A preset only remembers the TABLE number, not the table. Message thread, like the pattern slots.
     static constexpr int kTableSlots = 7;                      // = WT8Engine::kNumTables
     /** Reads `file` (a WAV), converts it to 33 x 2048 (WavetableImport.h) and puts it in `slot` (0..6). `message` says what
-        was done, or why not; on failure nothing changes. */
-    bool loadUserTable(int slot, const juce::File& file, juce::String& message);
+        was done, or why not; on failure nothing changes.
+        v0.11: `frameSize` 0 = Auto (as in v0.10); 64..16384 says how many samples one frame of the file has, overriding any marker in it. */
+    bool loadUserTable(int slot, const juce::File& file, juce::String& message, int frameSize = 0);
     void resetUserTable(int slot);                             // back to the built-in table
     bool slotHasUserTable(int slot) const;
     juce::String userTableName(int slot) const;                // the file name it came from, empty for a built-in table

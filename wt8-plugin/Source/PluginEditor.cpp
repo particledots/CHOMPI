@@ -941,13 +941,29 @@ void WT8Editor::loadTableFromFile()
         if (safe == nullptr) return;
         const juce::File f = fc.getResult();
         if (!f.existsAsFile()) return; // cancelled
-        juce::String msg;
-        const bool ok = safe->proc_.loadUserTable(slot, f, msg);
-        safe->refreshTableControls();
-        juce::AlertWindow::showMessageBoxAsync(ok ? juce::MessageBoxIconType::InfoIcon : juce::MessageBoxIconType::WarningIcon,
-                                               ok ? "Wavetable loaded" : "Could not load the wavetable",
-                                               ok ? "Table " + juce::String(slot + 1) + " now holds \"" + f.getFileNameWithoutExtension() + "\": " + msg + "."
-                                                  : msg);
+        // v0.11: ask for the frame size before loading. Auto (the default) behaves exactly as in v0.10.
+        auto* ask = new juce::AlertWindow("Load \"" + f.getFileNameWithoutExtension() + "\" into table " + juce::String(slot + 1),
+                                          "FRAME SIZE: how many samples one frame of the file has. Leave it on Auto unless the table sounds like chopped-up audio "
+                                          "(common sizes: 2048 for Serum / Vital, 256 or 512 for others).",
+                                          juce::MessageBoxIconType::QuestionIcon);
+        ask->addComboBox("frame", {"Auto", "256", "512", "1024", "2048", "4096", "8192"}, "Frame size (samples)");
+        ask->getComboBoxComponent("frame")->setSelectedItemIndex(0);
+        ask->addButton("LOAD", 1, juce::KeyPress(juce::KeyPress::returnKey));
+        ask->addButton("CANCEL", 0, juce::KeyPress(juce::KeyPress::escapeKey));
+        juce::Component::SafePointer<juce::AlertWindow> askSafe(ask);
+        ask->enterModalState(true, juce::ModalCallbackFunction::create([safe, askSafe, slot, f](int result) {
+            if (result != 1 || safe == nullptr || askSafe == nullptr) return;
+            const int idx = askSafe->getComboBoxComponent("frame")->getSelectedItemIndex();
+            static const int sizes[] = {0, 256, 512, 1024, 2048, 4096, 8192};
+            const int frameSize = sizes[juce::jlimit(0, 6, idx)];
+            juce::String msg;
+            const bool ok = safe->proc_.loadUserTable(slot, f, msg, frameSize);
+            safe->refreshTableControls();
+            juce::AlertWindow::showMessageBoxAsync(ok ? juce::MessageBoxIconType::InfoIcon : juce::MessageBoxIconType::WarningIcon,
+                                                   ok ? "Wavetable loaded" : "Could not load the wavetable",
+                                                   ok ? "Table " + juce::String(slot + 1) + " now holds \"" + f.getFileNameWithoutExtension() + "\": " + msg + "."
+                                                      : msg);
+        }), true);
     });
 }
 

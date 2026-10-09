@@ -155,6 +155,8 @@ bool convertToTable(const std::vector<float>& x, int hint, std::vector<float>& o
             resampleFrame(x.data() + i * (size_t) fs, fs, src.back().data());
         }
         note = std::to_string(cnt) + " frame" + (cnt == 1 ? "" : "s") + " of " + std::to_string(fs) + " samples, mapped to 33";
+        if (const size_t rest = x.size() % (size_t) fs; rest != 0)
+            note += " (the last " + std::to_string(rest) + " samples did not fill a frame and were left out)";
     }
     else
     {
