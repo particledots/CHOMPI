@@ -76,6 +76,8 @@ Under the WAVETABLE knob, **LOAD** puts a `.wav` file into the table slot the kn
 
 After you pick the file, a small window asks for the **frame size** (v0.11): **Auto** (the default) does what is described above; 256, 512, 1024, 2048, 4096 or 8192 says how many samples one frame of the file has and overrides both the length rules and any `clm` marker. Use it when a table from another synth sounds like chopped-up audio because the file has no marker and its frames are not 2048 samples long. If the file length is not a whole number of frames, the left-over samples at the end are ignored (the alert says so).
 
+Next to the oscillator knobs a small picture (v0.12) shows the table in the selected slot: the frame at the FRAME knob, large, and all 33 frames below it as a stack (frame 0 in front, the current frame lit). It follows the WAVETABLE and FRAME knobs, host automation, LOAD and RESET. It is display only (no mouse). The knobs in the OSCILLATOR group are a little narrower to make room, so a long file name in the `USER:` label is cut off earlier.
+
 A loaded table is stored **inside the project** (about 350 KB per slot in the saved state), so the project does not depend on the file afterwards. A preset only stores the TABLE number, not the table. The engine still holds 7 tables (the firmware's limit), so a loaded table replaces one slot.
 
 ## Wavetable maker (tools/make_wavetables.py)

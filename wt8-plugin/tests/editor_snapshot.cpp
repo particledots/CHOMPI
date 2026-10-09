@@ -18,6 +18,14 @@ int main(int argc, char** argv)
     auto set = [&](const char* id, float norm) { if (auto* p = proc.apvts.getParameter(id)) p->setValueNotifyingHost(norm); };
     set("table", 0.33f); set("octave", 1.0f); set("pitch", 0.62f); set("cutoff", 0.7f); set("pan", 0.3f);
     proc.setPlayConfigDetails(0, 2, 48000.0, 512); proc.prepareToPlay(48000.0, 512);
+    // v0.12: [12] = FRAME knob 0..32 (picture of the table), [13] = a .wav LOADed into the selected table slot (shows the USER label)
+    if (argc > 12 && juce::String(argv[12]) != "-") set("cycle", (float) std::atoi(argv[12]) / 32.0f);
+    if (argc > 13)
+    {
+        juce::String msg;
+        const int slot = juce::jlimit(0, WT8AudioProcessor::kTableSlots - 1, juce::roundToInt(proc.apvts.getRawParameterValue("table")->load()) - 1);
+        if (!proc.loadUserTable(slot, juce::File(argv[13]), msg)) { fprintf(stderr, "LOAD failed: %s\n", msg.toRawUTF8()); return 2; }
+    }
     for (int n : {60, 64, 67, 72}) proc.sequencer().recordNote(n, 100);
     proc.sequencer().addRest(); for (int n : {65, 62, 59, 55, 57, 60, 64}) proc.sequencer().recordNote(n, 90);
     for (int i = 0; i < 12; ++i) proc.sequencer().setProb(i, i % 4 == 0 ? 100 : 100 - i * 7); // a few non-default step probabilities

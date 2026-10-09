@@ -103,6 +103,11 @@ class WT8AudioProcessor : public juce::AudioProcessor
     void resetUserTable(int slot);                             // back to the built-in table
     bool slotHasUserTable(int slot) const;
     juce::String userTableName(int slot) const;                // the file name it came from, empty for a built-in table
+    /** v0.12: the table the engine plays for `slot` (the loaded one, else the built-in one), 33 x 2048 floats, for the editor's
+        picture. Message thread. False for a slot out of range. */
+    bool getTableData(int slot, std::vector<float>& out) const;
+    /** v0.12: changes whenever a slot's table data changes (LOAD, RESET, a project that brings or removes tables). */
+    int tableRevision() const { return tableRevision_.load(); }
 
   private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
@@ -116,6 +121,7 @@ class WT8AudioProcessor : public juce::AudioProcessor
     std::vector<float> handoff_[kTableSlots];
     std::atomic<bool> handoffFlag_[kTableSlots];
     std::atomic<bool> handoffAny_{false};
+    std::atomic<int> tableRevision_{0};
     void loadWavetables(WT8Engine& e);
 
     std::unique_ptr<WT8Engine> engine_;

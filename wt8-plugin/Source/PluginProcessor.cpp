@@ -143,6 +143,7 @@ bool WT8AudioProcessor::builtinTableData(int slot, std::vector<float>& out) cons
 
 void WT8AudioProcessor::setSlotData(int slot, const std::vector<float>& data)
 {
+    tableRevision_.fetch_add(1);
     const juce::SpinLock::ScopedLockType sl(handoffLock_);
     handoff_[slot] = data;
     handoffFlag_[slot].store(true);
@@ -175,6 +176,16 @@ juce::String WT8AudioProcessor::userTableName(int slot) const
     if (slot < 0 || slot >= kTableSlots) return {};
     const juce::ScopedLock sl(userLock_);
     return userName_[slot];
+}
+
+bool WT8AudioProcessor::getTableData(int slot, std::vector<float>& out) const
+{
+    if (slot < 0 || slot >= kTableSlots) return false;
+    {
+        const juce::ScopedLock sl(userLock_);
+        if (!userTable_[slot].empty()) { out = userTable_[slot]; return true; }
+    }
+    return builtinTableData(slot, out);
 }
 
 bool WT8AudioProcessor::loadUserTable(int slot, const juce::File& file, juce::String& message, int frameSize)

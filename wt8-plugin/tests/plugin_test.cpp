@@ -1119,6 +1119,50 @@ int main()
                 auto back = makeProc(); back->setStateInformation(st3.getData(), (int) st3.getSize());
                 check(maxDiff(render(*back, 40, true), soundNo1024) < 1e-6f, "a table loaded with frame size 1024 comes back from the project unchanged");
             }
+            // ---- v0.12: the table picture's data source (getTableData / tableRevision) ----
+            {
+                auto pr = makeProc();
+                std::vector<float> t; bool allOk = true;
+                for (int sl = 0; sl < WT8AudioProcessor::kTableSlots; ++sl)
+                {
+                    t.clear();
+                    bool good = pr->getTableData(sl, t) && t.size() == (size_t) wtimport::kTableFloats;
+                    for (float v : t) if (!std::isfinite(v) || std::fabs(v) > 1.0f) good = false;
+                    allOk = allOk && good;
+                }
+                check(allOk, "getTableData: all 7 built-in slots give 33 x 2048 finite floats within +/-1");
+                std::vector<float> junkOut(5, 1.f);
+                check(!pr->getTableData(-1, junkOut) && !pr->getTableData(7, junkOut), "getTableData: slots out of range are refused");
+                std::vector<float> b1, b2, b3;
+                pr->getTableData(1, b1); pr->getTableData(2, b2);
+                check(maxDiff(b1, b2) > 0.05f, "getTableData: different built-in slots give different data");
+
+                const int r0 = pr->tableRevision();
+                check(!pr->loadUserTable(2, junkFile, msg) && pr->tableRevision() == r0, "a refused LOAD leaves the revision alone");
+                check(pr->loadUserTable(2, goodFile, msg) && pr->tableRevision() != r0, "a LOAD changes the revision");
+                std::vector<float> u2, u1;
+                pr->getTableData(2, u2); pr->getTableData(1, u1);
+                check(u2.size() == (size_t) wtimport::kTableFloats && maxDiff(u2, b2) > 0.05f, "...and getTableData now gives the loaded table for that slot");
+                check(maxDiff(u1, b1) == 0.f, "...while the other slots still give their built-in tables");
+                const int r1 = pr->tableRevision();
+                pr->resetUserTable(2);
+                pr->getTableData(2, b3);
+                check(pr->tableRevision() != r1 && maxDiff(b3, b2) == 0.f, "RESET changes the revision and gives the built-in data back, exactly");
+                const int r2 = pr->tableRevision();
+                pr->resetUserTable(2); pr->resetUserTable(4);
+                check(pr->tableRevision() == r2, "RESET on slots without a loaded table does not change the revision");
+
+                auto src = makeProc(); src->loadUserTable(4, goodFile, msg);
+                juce::MemoryBlock stT; src->getStateInformation(stT);
+                auto dst = makeProc(); const int rd = dst->tableRevision();
+                dst->setStateInformation(stT.getData(), (int) stT.getSize());
+                std::vector<float> fromSrc, fromDst; src->getTableData(4, fromSrc); dst->getTableData(4, fromDst);
+                check(dst->tableRevision() != rd && maxDiff(fromSrc, fromDst) == 0.f, "a project that brings a table changes the revision, and the picture's data is the saved table");
+                const int rd2 = dst->tableRevision();
+                dst->setStateInformation(stBuiltin.getData(), (int) stBuiltin.getSize());
+                std::vector<float> back, ref4; dst->getTableData(4, back); ref->getTableData(4, ref4);
+                check(dst->tableRevision() != rd2 && maxDiff(back, ref4) == 0.f, "a project without tables changes the revision again and the built-in data is back");
+            }
             dir.deleteRecursively();
         }
         printf("v0.10 user wavetables: %s\n", v10Ok ? "ok" : "FAILED");

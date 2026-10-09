@@ -1,4 +1,5 @@
 #include "PluginEditor.h"
+#include "WavetableImport.h"
 
 namespace
 {
@@ -727,7 +728,7 @@ WT8Editor::WT8Editor(WT8AudioProcessor& p) : juce::AudioProcessorEditor(&p), pro
     auto& pan     = addKnob("pan",    "PAN",   Kind::Pan, true);
     auto& boost   = addKnob("output", "BOOST", Kind::Decibels, true);
 
-    row1_.push_back({"OSCILLATOR", {&table, &frame, &octave, &pitch}, {}});
+    row1_.push_back({"OSCILLATOR", {&table, &frame, &octave, &pitch}, {}, 2});
     row1_.push_back({"ENVELOPE",   {&attack, &release}, {}});
     row1_.push_back({"FILTER",     {&cutoff, &reso}, {}});
     row2_.push_back({"LFO",        {&plfoD, &plfoR, &flfoD, &flfoR}, {}});
@@ -883,6 +884,7 @@ WT8Editor::WT8Editor(WT8AudioProcessor& p) : juce::AudioProcessorEditor(&p), pro
     timerCallback(); // fill in the transpose readout and scale state straight away
     // v0.10: LOAD / RESET under the WAVETABLE knob
     for (auto* b : {&loadTableBtn_, &resetTableBtn_}) addAndMakeVisible(*b);
+    addAndMakeVisible(tableView_);
     loadTableBtn_.onClick = [this] { loadTableFromFile(); };
     resetTableBtn_.onClick = [this] {
         proc_.resetUserTable(juce::jlimit(0, WT8AudioProcessor::kTableSlots - 1, juce::roundToInt(proc_.apvts.getRawParameterValue("table")->load()) - 1));
@@ -928,6 +930,79 @@ void WT8Editor::refreshTableControls()
         tableKnob_->name.setColour(juce::Label::textColourId, user ? kAccent : kDim);
     }
     resetTableBtn_.setEnabled(user);
+
+    // v0.12: the picture follows the slot, the table's data and the FRAME knob (also when the host automates them)
+    const int rev = proc_.tableRevision();
+    if (slot != shownTableSlot_ || rev != shownTableRevision_)
+    {
+        std::vector<float> t;
+        if (proc_.getTableData(slot, t)) tableView_.setTable(t);
+        shownTableSlot_ = slot;
+        shownTableRevision_ = rev;
+    }
+    const int frame = juce::roundToInt(proc_.apvts.getRawParameterValue("cycle")->load());
+    if (frame != shownTableFrame_) { shownTableFrame_ = frame; tableView_.setFrame(frame); }
+}
+
+void TableView::paint(juce::Graphics& g)
+{
+    const auto r = getLocalBounds().toFloat();
+    const float s = juce::jmax(0.5f, r.getWidth() / 150.0f);
+    g.setColour(kBg);
+    g.fillRoundedRectangle(r, 4.0f * s);
+    g.setColour(kEdge);
+    g.drawRoundedRectangle(r.reduced(0.5f), 4.0f * s, 1.0f);
+    constexpr int kFr = wtimport::kFrames, kLen = wtimport::kFrameSize;
+    if (table_.size() < (size_t) wtimport::kTableFloats) return;
+    const int cur = juce::jlimit(0, kFr - 1, frame_);
+
+    auto inner = r.reduced(6.0f * s, 5.0f * s);
+    auto top = inner.removeFromTop(inner.getHeight() * 0.56f);
+    inner.removeFromTop(4.0f * s);
+    const auto stack = inner;
+
+    auto wavePath = [&](int frame, juce::Rectangle<float> box, float amp, int points) {
+        juce::Path p;
+        const float* d = &table_[(size_t) frame * kLen];
+        for (int i = 0; i <= points; ++i)
+        {
+            const float v = juce::jlimit(-1.0f, 1.0f, d[(i * kLen / points) % kLen] / 0.95f);
+            const float x = box.getX() + box.getWidth() * (float) i / (float) points;
+            const float y = box.getCentreY() - v * amp;
+            if (i == 0) p.startNewSubPath(x, y); else p.lineTo(x, y);
+        }
+        return p;
+    };
+
+    // the frame at the FRAME knob
+    g.setColour(kEdge);
+    g.drawHorizontalLine((int) top.getCentreY(), top.getX(), top.getRight());
+    g.setColour(kAccent);
+    g.strokePath(wavePath(cur, top, top.getHeight() * 0.46f, 512), juce::PathStrokeType(1.4f * s, juce::PathStrokeType::curved));
+    g.setColour(kDim);
+    g.setFont(makeFont(9.5f * s));
+    g.drawText("FRAME " + juce::String(cur) + " / 32", top.toNearestInt().removeFromTop(int(12 * s)), juce::Justification::topLeft);
+
+    // all 33 frames: frame 0 in front (bottom), frame 32 at the back (top), the current one lit
+    const float amp = stack.getHeight() * 0.16f;
+    const float step = (stack.getHeight() - 2.0f * amp) / (float) (kFr - 1);
+    auto box = [&](int f) { return juce::Rectangle<float>(stack.getX(), stack.getBottom() - amp - (float) f * step - amp, stack.getWidth(), 2.0f * amp); };
+    // back to front; each frame is filled with the background below its line, so the frames in front hide the ones behind
+    for (int f = kFr - 1; f >= 0; --f)
+    {
+        auto p = wavePath(f, box(f), amp, 128);
+        juce::Path filled(p);
+        filled.lineTo(stack.getRight(), stack.getBottom());
+        filled.lineTo(stack.getX(), stack.getBottom());
+        filled.closeSubPath();
+        g.setColour(kBg);
+        g.fillPath(filled);
+        g.setColour(f == cur ? kAccent : kDim.withAlpha(0.8f));
+        g.strokePath(p, juce::PathStrokeType((f == cur ? 1.4f : 0.8f) * s));
+    }
+    // the current frame once more, on top, so the frames in front never hide it
+    g.setColour(kAccent);
+    g.strokePath(wavePath(cur, box(cur), amp, 128), juce::PathStrokeType(1.4f * s));
 }
 
 void WT8Editor::loadTableFromFile()
@@ -1220,17 +1295,22 @@ void WT8Editor::resized()
     auto layoutRow = [&](std::vector<Group>& row, juce::Rectangle<int> r)
     {
         int total = 0;
-        for (auto& g : row) total += (int) g.knobs.size();
+        for (auto& g : row) total += (int) g.knobs.size() + g.extraCells;
         const int usable = r.getWidth() - gap * ((int) row.size() - 1);
         int x = r.getX();
         for (size_t i = 0; i < row.size(); ++i)
         {
             auto& grp = row[i];
+            const int cells = (int) grp.knobs.size() + grp.extraCells;
             const int w = (i + 1 == row.size()) ? r.getRight() - x
-                                                : usable * (int) grp.knobs.size() / total;
+                                                : usable * cells / total;
             grp.bounds = {x, r.getY(), w, r.getHeight()};
             auto inner = grp.bounds.withTrimmedTop(int(24 * scale)).reduced(int(4 * scale), int(4 * scale));
-            const int cellW = inner.getWidth() / (int) grp.knobs.size();
+            const int cellW = inner.getWidth() / cells;
+            if (grp.extraCells > 0) // v0.12: the table picture takes the cells after the knobs
+                tableView_.setBounds(juce::Rectangle<int>(inner.getX() + (int) grp.knobs.size() * cellW, inner.getY(),
+                                                          inner.getRight() - (inner.getX() + (int) grp.knobs.size() * cellW), inner.getHeight())
+                                         .reduced(int(4 * scale), int(2 * scale)));
             for (size_t j = 0; j < grp.knobs.size(); ++j)
             {
                 auto cell = inner.withX(inner.getX() + (int) j * cellW).withWidth(cellW);

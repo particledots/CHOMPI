@@ -118,6 +118,19 @@ class PresetCombo : public juce::ComboBox
     void showPopup() override { if (onOpen) onOpen(); juce::ComboBox::showPopup(); }
 };
 
+/** v0.12: draws a wavetable (33 frames x 2048 samples): the frame at the FRAME knob large, and all 33 frames as an offset stack
+    (frame 0 in front) with the current one lit. Display only; no mouse handling. */
+class TableView : public juce::Component
+{
+public:
+    void setTable(const std::vector<float>& t) { table_ = t; repaint(); }
+    void setFrame(int f) { if (f != frame_) { frame_ = f; repaint(); } }
+    void paint(juce::Graphics& g) override;
+private:
+    std::vector<float> table_;
+    int frame_ = 0;
+};
+
 class WT8Editor : public juce::AudioProcessorEditor, private juce::Timer
 {
   public:
@@ -143,6 +156,7 @@ class WT8Editor : public juce::AudioProcessorEditor, private juce::Timer
         juce::String title;
         std::vector<Knob*> knobs;
         juce::Rectangle<int> bounds; // filled in by resized()
+        int extraCells = 0;          // v0.12: room (in knob widths) kept free at the right of the group, for the table picture
     };
 
     // Presets (sound settings, chosen from the header): INIT, the compiled-in STARTER presets (v0.9) and the user's files (v0.8).
@@ -159,6 +173,9 @@ class WT8Editor : public juce::AudioProcessorEditor, private juce::Timer
     void refreshTableControls();
     void loadTableFromFile();
     juce::TextButton loadTableBtn_{"LOAD"}, resetTableBtn_{"RESET"};
+    // v0.12: a picture of the table in the selected slot: the frame at the FRAME knob, and all 33 frames as a stack
+    TableView tableView_;
+    int shownTableSlot_ = -1, shownTableRevision_ = -1, shownTableFrame_ = -1;
     Knob* tableKnob_ = nullptr;
     juce::String shownTableLabel_;
     std::unique_ptr<juce::FileChooser> tableChooser_;
