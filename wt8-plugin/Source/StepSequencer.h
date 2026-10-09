@@ -103,6 +103,8 @@ class StepSequencer
     /** Which pass through the loop step counter `k` belongs to (0 = the first). A pass is one full trip through the loop:
         N steps (forward, backward, random), 2N steps (pendulum with the ends repeated) or 2N-2 steps (pendulum). */
     static long long passIndex(long long k, int loopLength, int direction, bool pendulumRepeatEnds);
+    /** v0.13: number of steps in one pass (see passIndex). A pass starts whenever the step counter is a multiple of this. */
+    static long long passPeriod(int loopLength, int direction, bool pendulumRepeatEnds);
     /** True when "pass a of every b" lets the step play on pass `pass`. */
     static bool conditionPasses(int a, int b, long long pass);
 
@@ -132,6 +134,29 @@ class StepSequencer
     /** v0.8 (pattern slots): after the pattern was swapped, play again from step 1 (Free sync). A note that is sounding is
         not cut: it ends through its gate or when the next step starts. In Logic sync the position still comes from the host. */
     void restart();
+
+    // ---- v0.13: STEP 1 (RETRIG) and loop-end pattern switching ----
+    /** "Free" sync only. From the next step start on, the pattern plays from step 1 again (counters, passes and, with SEED off, the
+        random choices start fresh). The step that is sounding is not cut: it, and its ratchet repeats, play out, and step 1 comes on
+        the step boundary after, so the timing grid is kept (like the Octone, whose reset takes effect on the next clock). Ignored in
+        Logic sync, and when the sequence is not running (a request never waits around for a later start). Any thread. */
+    void requestStep1() { step1Pending_.store(true, std::memory_order_relaxed); }
+    /** Queues a pattern (text as from serialize()) that replaces the live one when the current pass through the loop ends (the same
+        "pass" the COND lane counts), tagged with the slot number the processor files it under. Replaces an earlier queue. The new
+        pattern starts on its own step 1 at that moment. If the sequence is not running (stopped, recording, empty pattern) it is
+        swapped in at the next audio block instead. Message thread. Returns false (nothing queued) while an earlier swap has not
+        been collected with takeSwitch(). */
+    bool queueSwitch(const std::string& text, int slot);
+    /** Replaces the queued pattern's text, but only if `slot` is the queued slot. True if it was. (COPY into a queued slot.) */
+    bool replaceQueued(int slot, const std::string& text);
+    void cancelQueuedSwitch();
+    int  queuedSlot() const { return queuedSlot_.load(std::memory_order_relaxed); } // -1 = nothing queued
+    /** True when the audio thread has swapped in a queued pattern and the message thread has not collected it yet. */
+    bool switchPending() const { return switchedFlag_.load(std::memory_order_relaxed); }
+    /** Message thread. One atomic step under the sequencer's lock: writes the live pattern's text to `live` (if not null), cancels the
+        queue if asked, and, if a queued pattern was swapped in since the last call, returns true with `outgoing` = the text of the
+        pattern that was replaced and `newSlot` = the slot that is live now. */
+    bool takeSwitch(std::string* live, std::string& outgoing, int& newSlot, bool cancelQueue);
 
     // ---- audio thread ----
     void recordNote(int note, int velocity);
@@ -166,6 +191,20 @@ class StepSequencer
     int    ratNote_ = 60;
     std::atomic<int> displayIdx_{-1};
     std::atomic<bool> running_{false};
+
+    // v0.13. kOff_: the step counter at which the current pattern started (STEP 1, or a loop-end switch); every use of the counter
+    // for playback (which step, which pass, the random rolls) is relative to it, while swing keeps using the absolute counter so the
+    // timing grid never moves. It is 0 whenever playback (re)starts or a Logic relocate happens.
+    long long kOff_ = 0;
+    std::atomic<bool> step1Pending_{false};
+    SeqStep queued_[kMaxSteps];
+    int     queuedLen_ = 0;
+    std::atomic<int> queuedSlot_{-1};            // written under the lock; -1 = nothing queued
+    SeqStep outgoing_[kMaxSteps];                // the pattern the audio thread replaced, until the message thread collects it
+    int     outgoingLen_ = 0;
+    int     switchedSlot_ = -1;
+    bool    switched_ = false;                   // under the lock
+    std::atomic<bool> switchedFlag_{false};      // a copy of switched_ that can be read without the lock
 
     // random choices (probability, random direction) are a pure function of (key, step counter); with SEED off the
     // key is redrawn whenever playback starts or the host jumps, so every start sounds different

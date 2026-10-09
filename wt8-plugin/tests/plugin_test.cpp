@@ -1168,7 +1168,175 @@ int main()
         printf("v0.10 user wavetables: %s\n", v10Ok ? "ok" : "FAILED");
     }
 
-    bool ok = seqOk && v4Ok && v5Ok && v6Ok && v8Ok && v9Ok && v10Ok && finite && peak > 0.02f && peak <= 1.5f && held > 0.005f && tail < held * 0.05f && std::fabs(cutoff - 0.2f) < 0.01f;
+    // ---- v0.13: loop-end pattern switching (slot bookkeeping around the audio thread's swap) and STEP 1 ----
+    bool v13Ok = true;
+    {
+        auto setPlain = [](WT8AudioProcessor& pr, const char* id, float plain) {
+            auto* p = dynamic_cast<juce::RangedAudioParameter*>(pr.apvts.getParameter(id));
+            p->setValueNotifyingHost(p->convertTo0to1(plain));
+        };
+        auto check = [&](bool cond, const char* what) { printf("  %s: %s\n", cond ? "ok  " : "FAIL", what); v13Ok = v13Ok && cond; };
+        auto makeProc = [&]() {
+            auto pr = std::make_unique<WT8AudioProcessor>();
+            pr->setPlayConfigDetails(0, 2, sr, bs); pr->prepareToPlay(sr, bs);
+            return pr;
+        };
+        juce::AudioBuffer<float> b(2, bs); juce::MidiBuffer none; bool fin = true; float pk = 0;
+        auto runB = [&](WT8AudioProcessor& pr, int blocks) {
+            pk = 0;
+            for (int blk = 0; blk < blocks; ++blk)
+            {
+                b.clear(); pr.processBlock(b, none);
+                for (int i = 0; i < bs; ++i) { const float v = b.getSample(0, i); if (!std::isfinite(v)) fin = false; pk = std::fmax(pk, std::fabs(v)); }
+            }
+        };
+        // runs until the audio thread has swapped a queued pattern in (without asking the slot functions, which would collect it); -1 = never
+        auto runUntilSwapped = [&](WT8AudioProcessor& pr, int maxBlocks) {
+            for (int blk = 0; blk < maxBlocks; ++blk) { runB(pr, 1); if (pr.sequencer().switchPending()) return blk + 1; }
+            return -1;
+        };
+        // slot 1 = A (4 notes), slot 5 = B (3 notes), playing slot 1 at 1/16 (a pass is 4 steps = about 43 blocks)
+        auto setUp = [&](bool loopEnd, bool play) {
+            auto pr = makeProc();
+            for (int n : {60, 64, 67, 72}) pr->sequencer().recordNote(n, 100);
+            pr->selectPatternSlot(4); for (int n : {48, 50, 53}) pr->sequencer().recordNote(n, 100);
+            pr->selectPatternSlot(0);
+            if (loopEnd) pr->setSlotAtLoopEnd(true);
+            if (play) { pr->apvts.getParameter("seq_play")->setValueNotifyingHost(1.f); runB(*pr, 14); }
+            return pr;
+        };
+        const std::string patA = [&] { StepSequencer t; for (int n : {60, 64, 67, 72}) t.recordNote(n, 100); return t.serialize(); }();
+        const std::string patB = [&] { StepSequencer t; for (int n : {48, 50, 53}) t.recordNote(n, 100); return t.serialize(); }();
+
+        // the switch is OFF by default and then a click on a slot switches at once, as in v0.12
+        {
+            auto p = setUp(false, true);
+            check(!p->getSlotAtLoopEnd(), "the switch is off by default");
+            p->requestPatternSlot(4);
+            check(p->getPatternSlot() == 4 && p->getQueuedPatternSlot() == -1 && p->sequencer().serialize() == patB, "switch off: a click on a slot switches at once");
+            p->requestPatternSlot(99);
+            check(p->getPatternSlot() == 15, "...and a slot number past the end is clamped, as before");
+        }
+        // switch on, playing: the click waits, the playing slot keeps playing, the swap comes at a loop end
+        {
+            auto p = setUp(true, true);
+            p->requestPatternSlot(4);
+            check(p->getQueuedPatternSlot() == 4 && p->getPatternSlot() == 0 && p->sequencer().serialize() == patA, "the click queues slot 5; slot 1 is still the playing one");
+            p->sequencer().setNote(0, 61); // an edit made while the switch is waiting must stay with slot 1
+            StepSequencer t; t.deserialize(patA); t.setNote(0, 61); const std::string patA2 = t.serialize();
+            const int blocks = runUntilSwapped(*p, 80);
+            check(blocks > 0 && blocks <= 60, "the audio thread swaps the pattern in within one pass (about 43 blocks)");
+            check(p->getPatternSlot() == 4 && p->getQueuedPatternSlot() == -1 && p->sequencer().serialize() == patB, "afterwards slot 5 is the current slot and its pattern is live");
+            p->selectPatternSlot(0);
+            check(p->sequencer().serialize() == patA2, "slot 1 kept its pattern, including the edit made while the switch was waiting");
+            p->selectPatternSlot(4);
+            runB(*p, 40);
+            check(fin && pk > 0.01f, "audio after the swap is finite and the new pattern sounds");
+        }
+        // a project saved after the audio thread swapped, before anything asked the slot functions, files everything under the right slot
+        {
+            auto p = setUp(true, true);
+            p->requestPatternSlot(4);
+            check(runUntilSwapped(*p, 80) > 0 && p->sequencer().switchPending(), "set-up: the swap has happened and nobody has collected it");
+            juce::MemoryBlock st; p->getStateInformation(st);
+            auto q = makeProc(); q->setStateInformation(st.getData(), (int) st.getSize());
+            check(q->getPatternSlot() == 4 && q->sequencer().serialize() == patB, "the saved project has slot 5 as the current slot with its own pattern");
+            q->selectPatternSlot(0);
+            check(q->sequencer().serialize() == patA, "...and slot 1 still holds the first pattern (nothing was filed under the wrong slot)");
+            auto xml = juce::AudioProcessor::getXmlFromBinary(st.getData(), (int) st.getSize());
+            check(xml->getStringAttribute("sequence") == juce::String(patB) && xml->getIntAttribute("patCur") == 4 && xml->getStringAttribute("pat0") == juce::String(patA),
+                  "the file itself: `sequence` is the live pattern, patCur = 5, pat0 = the replaced pattern (older versions read it as usual)");
+        }
+        // a click on the playing slot cancels the wait; a second slot replaces the first; switching the switch off drops it
+        {
+            auto p = setUp(true, true);
+            p->requestPatternSlot(4); p->requestPatternSlot(0);
+            check(p->getQueuedPatternSlot() == -1, "a click on the playing slot cancels what was waiting");
+            runB(*p, 100);
+            check(p->getPatternSlot() == 0 && p->sequencer().serialize() == patA && !p->sequencer().switchPending(), "...and nothing switches later");
+
+            auto r = setUp(true, true);
+            r->selectPatternSlot(8); r->sequencer().recordNote(70, 100); r->selectPatternSlot(0);
+            r->requestPatternSlot(4); r->requestPatternSlot(8);
+            check(r->getQueuedPatternSlot() == 8, "a second click replaces the waiting slot");
+            runUntilSwapped(*r, 80);
+            check(r->getPatternSlot() == 8 && r->sequencer().length() == 1, "...and the second one is the one that plays");
+
+            auto s = setUp(true, true);
+            s->requestPatternSlot(4); s->setSlotAtLoopEnd(false);
+            check(s->getQueuedPatternSlot() == -1 && !s->getSlotAtLoopEnd(), "switching AT LOOP END off drops the waiting switch");
+            runB(*s, 100);
+            check(s->getPatternSlot() == 0, "...it does not happen later");
+            s->requestPatternSlot(4);
+            check(s->getPatternSlot() == 4, "...and clicks switch at once again");
+        }
+        // nothing playing: no loop end to wait for
+        {
+            auto p = setUp(true, false);
+            p->requestPatternSlot(4);
+            check(p->getPatternSlot() == 4 && p->getQueuedPatternSlot() == -1 && p->sequencer().serialize() == patB, "stopped: the click switches at once even with the switch on");
+            auto q = setUp(true, true); q->setSeqRecording(true); runB(*q, 4);
+            q->requestPatternSlot(4);
+            check(q->getPatternSlot() == 4, "record armed: switches at once as well");
+        }
+        // an empty slot is a valid target: silence from the loop end on
+        {
+            auto p = setUp(true, true);
+            p->requestPatternSlot(9);
+            check(runUntilSwapped(*p, 80) > 0 && p->getPatternSlot() == 9 && p->sequencer().length() == 0, "an empty slot waits for the loop end like any other, then the live pattern is empty");
+            runB(*p, 8); runB(*p, 400);
+            check(fin && pk < 0.01f, "...and it is silent (after the release tail)");
+        }
+        // COPY into the slot that is waiting: the waiting copy is the new one
+        {
+            auto p = setUp(true, true);
+            p->requestPatternSlot(4);
+            check(p->copyPatternSlot(0, 4), "set-up: copy slot 1 onto the slot that is waiting");
+            runUntilSwapped(*p, 80);
+            check(p->getPatternSlot() == 4 && p->sequencer().serialize() == patA, "when it comes in it is the copy (slot 1's pattern), not the old slot-5 pattern");
+        }
+        // saved with the project; the waiting switch is not; an older project has none
+        {
+            auto p = setUp(true, true);
+            p->requestPatternSlot(4);
+            juce::MemoryBlock st; p->getStateInformation(st);
+            auto q = makeProc(); q->setSlotAtLoopEnd(false);
+            q->setStateInformation(st.getData(), (int) st.getSize());
+            check(q->getSlotAtLoopEnd() && q->getQueuedPatternSlot() == -1 && q->getPatternSlot() == 0 && q->sequencer().serialize() == patA, "the switch comes back with the project; the waiting switch does not (slot 1, its pattern)");
+            auto xml = juce::AudioProcessor::getXmlFromBinary(st.getData(), (int) st.getSize());
+            xml->removeAttribute("slotLoopEnd");
+            juce::MemoryBlock old; juce::AudioProcessor::copyXmlToBinary(*xml, old);
+            auto r = makeProc(); r->setSlotAtLoopEnd(true);
+            r->setStateInformation(old.getData(), (int) old.getSize());
+            check(!r->getSlotAtLoopEnd(), "a project from before v0.13 has no switch: clicks switch at once, as they always did");
+        }
+        // opening a project while a switch is waiting: the waiting switch is dropped and cannot land in the opened project
+        {
+            auto src = makeProc();
+            for (int n : {30, 31}) src->sequencer().recordNote(n, 100);
+            src->selectPatternSlot(2); src->sequencer().recordNote(35, 100);
+            juce::MemoryBlock st; src->getStateInformation(st);
+            const std::string wantLive = src->sequencer().serialize();
+            auto p = setUp(true, true);
+            p->requestPatternSlot(4);
+            p->setStateInformation(st.getData(), (int) st.getSize());
+            runB(*p, 120);
+            check(p->getQueuedPatternSlot() == -1 && p->getPatternSlot() == 2 && p->sequencer().serialize() == wantLive && !p->sequencer().switchPending(), "a project opened while a switch was waiting: the opened project's slot and pattern, no late switch");
+        }
+        // STEP 1 through the processor: accepted while playing, harmless while stopped, audio stays finite
+        {
+            auto p = setUp(false, true);
+            p->requestStep1(); runB(*p, 60);
+            check(fin && pk > 0.01f, "STEP 1 while playing: the sequence goes on sounding, audio finite");
+            auto q = setUp(false, false);
+            q->requestStep1(); runB(*q, 10);
+            q->apvts.getParameter("seq_play")->setValueNotifyingHost(1.f); runB(*q, 40);
+            check(fin && pk > 0.01f, "STEP 1 while stopped is forgotten: the next PLAY starts normally");
+        }
+        printf("v0.13 loop-end slot switching + STEP 1: %s\n", v13Ok ? "ok" : "FAILED");
+    }
+
+    bool ok = seqOk && v4Ok && v5Ok && v6Ok && v8Ok && v9Ok && v10Ok && v13Ok && finite && peak > 0.02f && peak <= 1.5f && held > 0.005f && tail < held * 0.05f && std::fabs(cutoff - 0.2f) < 0.01f;
     printf(ok ? "PASS\n" : "FAIL\n");
     return ok ? 0 : 1;
 }

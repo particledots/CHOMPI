@@ -6,6 +6,7 @@
 // slot: pattern slot to select (1-16; it gets a note so it counts as used).  Slots 3 and 6 always hold a copy of slot 1, so their dots show.
 // preset (v0.9): none (default), init, s<n> = starter preset n loaded, s<n>mod = starter n loaded and then CUTOFF moved (the "modified" marker).
 // copy (v0.9): "copy" = press COPY, to show the armed state.
+// frame / wav (v0.12): see the code below.  [14] (v0.13): loopend = AT LOOP END on; queue<n> = on, with slot n waiting for the loop end.
 #include "PluginEditor.h"
 #include <cstdlib>
 #include <string>
@@ -20,7 +21,7 @@ int main(int argc, char** argv)
     proc.setPlayConfigDetails(0, 2, 48000.0, 512); proc.prepareToPlay(48000.0, 512);
     // v0.12: [12] = FRAME knob 0..32 (picture of the table), [13] = a .wav LOADed into the selected table slot (shows the USER label)
     if (argc > 12 && juce::String(argv[12]) != "-") set("cycle", (float) std::atoi(argv[12]) / 32.0f);
-    if (argc > 13)
+    if (argc > 13 && juce::String(argv[13]) != "-")
     {
         juce::String msg;
         const int slot = juce::jlimit(0, WT8AudioProcessor::kTableSlots - 1, juce::roundToInt(proc.apvts.getRawParameterValue("table")->load()) - 1);
@@ -49,7 +50,7 @@ int main(int argc, char** argv)
         const int blocks = 2 + (argc > 8 ? std::atoi(argv[8]) : 0);
         for (int i = 0; i < blocks; ++i) { m.clear(); proc.processBlock(b, m); }
     }
-    if (argc > 9) { proc.selectPatternSlot(std::atoi(argv[9]) - 1); proc.sequencer().recordNote(60, 100); } // v0.8: show the PATTERN box on another slot (that slot gets one note so it counts as used)
+    if (argc > 9 && juce::String(argv[9]) != "-") { proc.selectPatternSlot(std::atoi(argv[9]) - 1); proc.sequencer().recordNote(60, 100); } // v0.8: show the PATTERN box on another slot (that slot gets one note so it counts as used)
     if (argc > 10)
     {
         const juce::String spec(argv[10]);
@@ -59,6 +60,12 @@ int main(int argc, char** argv)
             proc.loadStarterPreset(spec.substring(1).getIntValue() - 1);
             if (spec.endsWithIgnoreCase("mod")) set("cutoff", 0.9f);
         }
+    }
+    if (argc > 14) // v0.13: "loopend" = AT LOOP END switched on; "queue<n>" = on, and slot n queued (the sequencer is playing, so it waits for the loop end)
+    {
+        const juce::String spec(argv[14]);
+        if (spec.startsWithIgnoreCase("loopend") || spec.startsWithIgnoreCase("queue")) proc.setSlotAtLoopEnd(true);
+        if (spec.startsWithIgnoreCase("queue")) proc.requestPatternSlot(spec.substring(5).getIntValue() - 1);
     }
     std::unique_ptr<juce::AudioProcessorEditor> ed(proc.createEditor());
     const int w = argc > 2 ? std::atoi(argv[2]) : 840;

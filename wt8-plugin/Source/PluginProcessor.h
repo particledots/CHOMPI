@@ -63,6 +63,20 @@ class WT8AudioProcessor : public juce::AudioProcessor
         (and changes nothing) when a slot number is out of range or from == to. Message thread only, like selectPatternSlot. */
     bool copyPatternSlot(int from, int to);
 
+    // ---- v0.13 loop-end pattern switching. With the switch ON, a click on a slot (requestPatternSlot) waits for the end of the
+    // current pass through the loop and then plays that slot from its step 1; with it OFF (the default, and what every older project
+    // has) it switches at once, exactly as selectPatternSlot does. The switch is saved with the project; the queue itself is not.
+    // The audio thread does the swap (it knows where the loop ends); the processor finds out afterwards and keeps the slot list right
+    // (every slot function below first collects a swap that has happened). Message thread, like selectPatternSlot.
+    bool getSlotAtLoopEnd() const { return slotAtLoopEnd_.load(); }
+    void setSlotAtLoopEnd(bool on);                       // switching it OFF drops a queued switch
+    /** What a click on a slot button does: switch at once (switch OFF, or nothing is playing to wait for), or queue it. Clicking the
+        playing slot while one is queued cancels the queue. */
+    void requestPatternSlot(int slot);
+    int  getQueuedPatternSlot() const { return seq_.queuedSlot(); } // -1 = none
+    /** "STEP 1": see StepSequencer::requestStep1(). */
+    void requestStep1() { seq_.requestStep1(); }
+
     // ---- v0.8 presets: the SOUND settings (not the sequencer, the pattern, or the output level/pan) as small files in a
     // folder on the computer, so they are available in every project.
     static const juce::StringArray& presetParameterIds();     // the parameters a preset stores
@@ -128,10 +142,14 @@ class WT8AudioProcessor : public juce::AudioProcessor
     double sampleRate_ = 48000.0;
     bool engineReady_ = false;
 
-    StepSequencer seq_;
+    mutable StepSequencer seq_; // (mutable: the const slot getters first collect a loop-end switch the audio thread has made)
     mutable juce::CriticalSection slotLock_;            // guards slots_ / slotCur_ (never taken on the audio thread)
-    std::string slots_[kPatternSlots];                  // saved text of each slot; slots_[slotCur_] is stale, seq_ holds it
-    int slotCur_ = 0;
+    mutable std::string slots_[kPatternSlots];          // saved text of each slot; slots_[slotCur_] is stale, seq_ holds it
+    mutable int slotCur_ = 0;                           // (mutable: a const getter first collects a loop-end switch the audio thread has made)
+    std::atomic<bool> slotAtLoopEnd_{false};
+    /** (slotLock_ held) Collects a queued pattern the audio thread has swapped in since the last call: the replaced pattern goes into
+        its slot's text and the new slot becomes current. `live` (if not null) gets the live pattern's text, `cancelQueue` drops any queue. */
+    void syncSlotsLocked(std::string* live, bool cancelQueue) const;
     juce::File presetFolderOverride_;
     void applyPresetValues(const std::map<juce::String, float>& values);
     void markPresetCurrent(PresetKind kind, const juce::String& name); // remembers the live sound parameters as this preset's values

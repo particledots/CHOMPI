@@ -764,6 +764,360 @@ int main()
         CHECK(alt2, "Logic sync: swapping to a 7-step pattern keeps notes alternating on / off");
     }
 
+    // ================================ v0.13: STEP 1 (RETRIG) and loop-end pattern switching ================================
+    auto onsOf = [](const std::vector<Ev>& e, long long from, long long to) { // note-ons in [from, to), shifted so `from` is 0
+        std::vector<Ev> v; for (auto& x : e) if (x.on && x.pos >= from && x.pos < to) v.push_back({x.pos - from, true, x.note, x.vel}); return v;
+    };
+    auto sameOns = [](const std::vector<Ev>& a, const std::vector<Ev>& b) {
+        if (a.size() != b.size()) return false;
+        for (size_t i = 0; i < a.size(); ++i) if (!near(a[i].pos, b[i].pos) || a[i].note != b[i].note || a[i].vel != b[i].vel) return false;
+        return true;
+    };
+    auto sameEv = [](const std::vector<Ev>& a, const std::vector<Ev>& b) { // same events, positions within 1 sample (block boundaries can round differently)
+        if (a.size() != b.size()) return false;
+        for (size_t i = 0; i < a.size(); ++i) if (!near(a[i].pos, b[i].pos) || a[i].on != b[i].on || a[i].note != b[i].note) return false;
+        return true;
+    };
+    auto balanced = [](const std::vector<Ev>& e) { // notes strictly alternate on / off, never two sounding at once
+        int bal = 0; for (auto& x : e) { bal += x.on ? 1 : -1; if (bal < 0 || bal > 1) return false; } return true;
+    };
+    auto cat = [](std::vector<Ev> a, const std::vector<Ev>& b, long long offset) { for (auto x : b) { x.pos += offset; a.push_back(x); } return a; };
+
+    printf("T30 STEP 1 (v0.13): the sounding step plays out, step 1 comes on the next step start, everything counts from there\n");
+    {
+        const long long reqAt = 13000; // inside step 3 (it started at 12000, gate 50 % = until 15000); the next step would start at 18000
+        const long long T = 18000;
+
+        // the sounding note is not cut
+        {
+            StepSequencer s; fill(s, {60, 62, 64, 65});
+            auto p1 = run(s, st, bpm, sr, 512, reqAt, false);
+            s.requestStep1();
+            auto p2 = run(s, st, bpm, sr, 512, 30000, false);
+            CHECK(!p1.empty() && p1.back().on && p1.back().note == 64, "set-up: note 64 sounds when STEP 1 is pressed");
+            CHECK(p2.size() > 2 && !p2[0].on && p2[0].note == 64 && near(p2[0].pos, 2000), "the sounding note ends through its own gate (+2000), not at the press (got pos %lld)", p2.empty() ? -1LL : p2[0].pos);
+            CHECK(p2.size() > 2 && p2[1].on && p2[1].note == 60 && near(p2[1].pos, T - reqAt), "step 1 (60) comes on at the next step start (+5000), got note %d at %lld", p2.size() > 1 ? p2[1].note : -1, p2.size() > 1 ? p2[1].pos : -1LL);
+            auto ons = onsOf(p2, 0, 1LL << 40);
+            CHECK(ons.size() >= 4 && ons[0].note == 60 && ons[1].note == 62 && ons[2].note == 64 && ons[3].note == 65, "...then 62, 64, 65 in order");
+            CHECK(balanced(cat(p1, p2, reqAt)), "no stuck or doubled note");
+        }
+        // pressed exactly on a step start: that step is step 1
+        {
+            StepSequencer s; fill(s, {60, 62, 64, 65});
+            run(s, st, bpm, sr, 512, 18000, false);
+            s.requestStep1();
+            auto p2 = run(s, st, bpm, sr, 512, 8000, false);
+            auto ons = onsOf(p2, 0, 1LL << 40);
+            CHECK(ons.size() >= 2 && ons[0].note == 60 && near(ons[0].pos, 0) && ons[1].note == 62 && near(ons[1].pos, 6000), "pressed on a step start: step 1 plays on that very step");
+        }
+        // a ratcheted step finishes its repeats; step 1 follows on the grid
+        {
+            StepSequencer s; fill(s, {60, 62, 64, 65}); s.setRatchet(2, 4); // step 3: repeats every 1500 samples from 12000
+            run(s, st, bpm, sr, 512, reqAt, false);
+            s.requestStep1();
+            auto p2 = run(s, st, bpm, sr, 512, 10000, false);
+            auto ons = onsOf(p2, 0, 1LL << 40);
+            CHECK(ons.size() >= 4 && ons[0].note == 64 && near(ons[0].pos, 500) && ons[1].note == 64 && near(ons[1].pos, 2000) && ons[2].note == 64 && near(ons[2].pos, 3500)
+                  && ons[3].note == 60 && near(ons[3].pos, 5000), "the three repeats still to come play out (+500 +2000 +3500), then step 1 at +5000");
+        }
+        // pressing it twice is the same as once
+        {
+            StepSequencer a, b; fill(a, {60, 62, 64, 65}); fill(b, {60, 62, 64, 65});
+            run(a, st, bpm, sr, 512, reqAt, false); run(b, st, bpm, sr, 512, reqAt, false);
+            a.requestStep1(); b.requestStep1(); b.requestStep1();
+            CHECK(sameEv(run(a, st, bpm, sr, 512, 40000, false), run(b, st, bpm, sr, 512, 40000, false)), "pressed twice = pressed once");
+        }
+        // from the step-1 boundary on, the run is exactly a fresh start: every direction, loop length, probability, conditions, ratchets, octave jumps
+        for (int dir = 0; dir < 4; ++dir)
+            for (int rep = 0; rep < (dir == 2 ? 2 : 1); ++rep)
+                for (int loopLen : {0, 4})
+                {
+                    auto build = [](StepSequencer& s) {
+                        fill(s, {60, 62, -1, 65, 67, 69});
+                        s.setRatchet(1, 2); s.setStepGate(3, 100); s.setCondition(4, 1, 2); s.setCondition(5, 2, 3); s.setProb(0, 80); s.setOctChance(3, 50);
+                    };
+                    SeqSettings c = st; c.direction = dir; c.pendRepeat = rep == 1; c.loopLen = loopLen; c.seed = 7; c.prob = 0.8f;
+                    const long long total = 200000;
+                    StepSequencer a; build(a);
+                    auto a1 = run(a, c, bpm, sr, 512, reqAt, false); a.requestStep1();
+                    auto a2 = run(a, c, bpm, sr, 512, total, false);
+                    StepSequencer f; build(f); auto fr = run(f, c, bpm, sr, 512, total, false);
+                    const bool same = sameOns(onsOf(a2, T - reqAt, 1LL << 40), onsOf(fr, 0, total - (T - reqAt)));
+                    CHECK(same, "STEP 1 = fresh start from the next step: direction %d%s, loop %d", dir, rep ? " (ends x2)" : "", loopLen);
+                    CHECK(balanced(cat(a1, a2, reqAt)), "notes alternate: direction %d%s, loop %d", dir, rep ? " (ends x2)" : "", loopLen);
+                }
+        // SEED off, random direction: valid notes only, nothing stuck, and the first step after the press is a step of the pattern
+        {
+            SeqSettings c = st; c.direction = 3; c.seed = 0;
+            StepSequencer a; fill(a, {60, 62, 64, 65});
+            auto a1 = run(a, c, bpm, sr, 512, reqAt, false); a.requestStep1(); auto a2 = run(a, c, bpm, sr, 512, 60000, false);
+            bool valid = true; for (auto& x : a2) if (x.on && (x.note < 60 || x.note > 65 || x.note == 61 || x.note == 63)) valid = false;
+            CHECK(valid && balanced(cat(a1, a2, reqAt)), "random direction with SEED off: only pattern notes, no stuck note");
+        }
+        // swing: the grid does not move, step 1 lands where the next step would have
+        {
+            SeqSettings w = st; w.swing = 66.7f;
+            StepSequencer base; fill(base, {60, 62, 64, 65}); auto b = run(base, w, bpm, sr, 512, 60000, false);
+            StepSequencer s; fill(s, {60, 62, 64, 65});
+            auto s1 = run(s, w, bpm, sr, 512, reqAt, false); s.requestStep1(); auto s2 = run(s, w, bpm, sr, 512, 60000 - reqAt, false);
+            long long nextBase = -1; for (auto& x : b) if (x.on && x.pos >= reqAt) { nextBase = x.pos; break; }
+            long long firstSeq = -1; int firstNote = -1; for (auto& x : s2) if (x.on) { firstSeq = x.pos + reqAt; firstNote = x.note; break; }
+            CHECK(nextBase > 0 && near(firstSeq, nextBase) && firstNote == 60, "with swing: step 1 lands on the next step start of the unchanged grid (%lld vs %lld, note %d)", firstSeq, nextBase, firstNote);
+            CHECK(balanced(cat(s1, s2, reqAt)), "with swing: notes alternate");
+        }
+        // block size does not matter
+        {
+            std::vector<Ev> ref;
+            for (int blk : {512, 64, 997, 4096})
+            {
+                StepSequencer s; fill(s, {60, 62, -1, 65}); s.setRatchet(3, 3);
+                auto p1 = run(s, st, bpm, sr, blk, reqAt, false); s.requestStep1(); auto p2 = run(s, st, bpm, sr, blk, 60000, false);
+                auto all = cat(p1, p2, reqAt);
+                if (ref.empty()) ref = all; else CHECK(sameEv(ref, all), "same events at block size %d", blk);
+            }
+        }
+        // Logic sync: STEP 1 does nothing (the bar decides)
+        {
+            StepSequencer a, b; fill(a, {60, 62, 64, 65}); fill(b, {60, 62, 64, 65});
+            const double ppqReq = (double) reqAt / 24000.0;
+            auto a1 = run(a, st, bpm, sr, 512, reqAt, true); a.requestStep1(); auto a2 = run(a, st, bpm, sr, 512, 40000, true, ppqReq);
+            auto b1 = run(b, st, bpm, sr, 512, reqAt, true); auto b2 = run(b, st, bpm, sr, 512, 40000, true, ppqReq);
+            CHECK(sameEv(cat(a1, a2, reqAt), cat(b1, b2, reqAt)), "Logic sync: STEP 1 is ignored");
+            // ...and the request is not kept for later: back in Free sync nothing is waiting
+            SeqSettings fr = st; StepSequencer c, d; fill(c, {60, 62, 64, 65}); fill(d, {60, 62, 64, 65});
+            run(c, st, bpm, sr, 512, 3000, true); c.requestStep1(); run(c, st, bpm, sr, 512, 3000, true, 3000.0 / 24000.0);
+            c.resetTransport(); // (the host stopped)
+            CHECK(sameEv(run(c, fr, bpm, sr, 512, 40000, false), run(d, fr, bpm, sr, 512, 40000, false)), "a request ignored in Logic sync does not wait for the next Free run");
+        }
+        // not running: a request never waits around for a later start
+        {
+            SeqSettings off = st; off.play = false;
+            StepSequencer a, b, c; fill(a, {60, 62, 64, 65}); fill(b, {60, 62, 64, 65}); fill(c, {60, 62, 64, 65});
+            a.requestStep1(); // stopped, nothing has been processed since
+            auto ea = run(a, st, bpm, sr, 512, 40000, false);
+            b.requestStep1(); run(b, off, bpm, sr, 512, 3000, false); // stopped, one block goes by
+            auto eb = run(b, st, bpm, sr, 512, 40000, false);
+            auto ec = run(c, st, bpm, sr, 512, 40000, false);
+            CHECK(sameEv(ea, ec) && sameEv(eb, ec), "a request made while stopped does not change the next start (plays from step 1 as always)");
+        }
+    }
+
+    printf("T31 loop-end pattern switching (v0.13): the queued pattern starts on its step 1 when the pass through the loop ends\n");
+    {
+        const long long queueAt = 13000; // inside step 3 of the first pass
+        auto text = [&](std::initializer_list<int> notes, auto&& edit) { StepSequencer t; fill(t, notes); edit(t); return t.serialize(); };
+        const std::string A = text({60, 62, 64, 65, 67, 69}, [](StepSequencer&) {});
+        const std::string B = text({72, 74, 76, 77, 79, 81, 83}, [](StepSequencer& t) { t.setRatchet(2, 2); t.setCondition(1, 2, 2); t.setStepGate(3, 100); t.setProb(5, 70); t.setOctChance(4, 50); });
+        auto load = [](StepSequencer& s, const std::string& t) { s.deserialize(t); };
+
+        // where the first pass ends, and that the switch happens exactly there, for every direction and loop length
+        struct Case { int dir; bool rep; int loopLen; long long end; const char* name; };
+        const Case cases[] = {
+            {0, false, 4, 4 * 6000, "forward, loop 4"},     {0, false, 0, 6 * 6000, "forward, whole pattern"},
+            {1, false, 4, 4 * 6000, "backward, loop 4"},    {2, false, 4, 6 * 6000, "pendulum, loop 4 (6 steps per pass)"},
+            {2, true, 4, 8 * 6000, "pendulum ends x2, loop 4 (8 steps per pass)"}, {3, false, 4, 4 * 6000, "random, loop 4"},
+            {3, false, 0, 6 * 6000, "random, whole pattern"}, {0, false, 1, 6000, "forward, loop 1 (every step ends a pass)"},
+        };
+        for (const auto& cs : cases)
+        {
+            SeqSettings c = st; c.direction = cs.dir; c.pendRepeat = cs.rep; c.loopLen = cs.loopLen; c.seed = 11; c.prob = 0.85f;
+            const long long total = 220000;
+            // with a loop of 1 the first pass boundary after the queue is the very next step
+            const long long expectEnd = cs.loopLen == 1 ? 18000 : cs.end;
+            StepSequencer a; load(a, A);
+            auto p1 = run(a, c, bpm, sr, 512, queueAt, false);
+            CHECK(a.queueSwitch(B, 5) && a.queuedSlot() == 5, "queued (%s)", cs.name);
+            auto p2 = run(a, c, bpm, sr, 512, total - queueAt, false);
+            auto all = cat(p1, p2, queueAt);
+            StepSequencer f; load(f, B); auto fr = run(f, c, bpm, sr, 512, total, false);
+            const bool same = sameOns(onsOf(all, expectEnd, total), onsOf(fr, 0, total - expectEnd));
+            CHECK(same, "%s: from the loop end (%lld) the queued pattern plays exactly like a fresh start of that pattern", cs.name, expectEnd);
+            // up to the loop end: the old pattern, untouched
+            StepSequencer base; load(base, A); auto br = run(base, c, bpm, sr, 512, total, false);
+            CHECK(sameOns(onsOf(all, 0, expectEnd), onsOf(br, 0, expectEnd)), "%s: until the loop end the old pattern plays on", cs.name);
+            CHECK(balanced(all), "%s: notes alternate on / off", cs.name);
+            std::string live, out; int slot = -1;
+            const bool got = a.takeSwitch(&live, out, slot, false);
+            CHECK(got && slot == 5 && out == A && live == B && a.queuedSlot() == -1 && !a.switchPending(), "%s: the swap is reported once: old pattern, new slot, live pattern", cs.name);
+            CHECK(!a.takeSwitch(&live, out, slot, false), "%s: ...and not a second time", cs.name);
+        }
+
+        // block size does not matter
+        {
+            std::vector<Ev> ref; SeqSettings c = st; c.loopLen = 4; c.seed = 3;
+            for (int blk : {512, 64, 997, 4096})
+            {
+                StepSequencer a; load(a, A);
+                auto p1 = run(a, c, bpm, sr, blk, queueAt, false); a.queueSwitch(B, 2); auto p2 = run(a, c, bpm, sr, blk, 90000, false);
+                auto all = cat(p1, p2, queueAt);
+                if (ref.empty()) ref = all; else CHECK(sameEv(ref, all), "loop-end switch: same events at block size %d", blk);
+            }
+        }
+
+        // the new pattern's conditions count from its own first pass (B's step 2 is "2 of 2": silent on pass 1, plays on pass 2)
+        {
+            SeqSettings c = st; c.loopLen = 4; c.seed = 3;
+            StepSequencer a; load(a, A);
+            auto p1 = run(a, c, bpm, sr, 512, queueAt, false); a.queueSwitch(B, 2); auto p2 = run(a, c, bpm, sr, 512, 200000, false);
+            auto ons = onsOf(cat(p1, p2, queueAt), 24000, 1LL << 40);
+            int first74 = -1, second74 = -1; long long pos1 = 0, pos2 = 0;
+            for (auto& x : ons) if (x.note == 74) { if (first74 < 0) { first74 = 1; pos1 = x.pos; } else if (second74 < 0) { second74 = 1; pos2 = x.pos; } }
+            CHECK(first74 > 0 && near(pos1, 30000), "B's 2-of-2 step stays silent in B's first pass and first plays in its second, at +30000 (got +%lld)", pos1);
+        }
+
+        // Logic sync: same loop end; and a relocate puts the pattern back on the bar
+        {
+            SeqSettings c = st; c.loopLen = 4; c.seed = 3;
+            StepSequencer a; load(a, A);
+            const double ppqQ = (double) queueAt / 24000.0;
+            auto p1 = run(a, c, bpm, sr, 512, queueAt, true); a.queueSwitch(B, 2);
+            auto p2 = run(a, c, bpm, sr, 512, 60000, true, ppqQ);
+            StepSequencer f; load(f, B); auto fr = run(f, c, bpm, sr, 512, 60000, true);
+            auto all = cat(p1, p2, queueAt);
+            CHECK(sameOns(onsOf(all, 24000, 60000), onsOf(fr, 0, 60000 - 24000)), "Logic sync: the queued pattern starts on its step 1 at the loop end");
+            CHECK(balanced(all), "Logic sync: notes alternate");
+            // the host jumps back to ppq 0.25 (= step 2 of the bar) 47104 samples into the second run: the pattern is bar-locked again, so step 2 of B sounds
+            const std::string B2 = text({72, 74, 76, 77, 79, 81, 83}, [](StepSequencer&) {}); // (no conditions, so step 2 sounds at once)
+            StepSequencer g; load(g, A);
+            auto g1 = run(g, c, bpm, sr, 512, queueAt, true); g.queueSwitch(B2, 2);
+            auto g2 = run(g, c, bpm, sr, 512, 70000, true, ppqQ, {{47104, 0.25}}); // (47104 = 92 blocks of 512)
+            auto after = onsOf(g2, 47104, 1LL << 40);
+            CHECK(after.size() >= 2 && after[0].note == 74 && near(after[0].pos, 0) && after[1].note == 76, "Logic sync: after a relocate the pattern follows the bar position again (step 2 of B, then step 3), got note %d", after.empty() ? -1 : after[0].note);
+            CHECK(balanced(cat(g1, g2, queueAt)), "Logic sync with a relocate: notes alternate");
+        }
+
+        // nothing is playing: the swap happens at once, in the next block
+        {
+            SeqSettings off = st; off.play = false;
+            StepSequencer a; load(a, A); a.queueSwitch(B, 4);
+            SeqEvent buf[8]; SeqHostInfo h; h.bpm = bpm;
+            a.process(sr, 512, h, off, buf, 8);
+            std::string live, outg; int slot = -1;
+            CHECK(a.takeSwitch(&live, outg, slot, false) && slot == 4 && outg == A && live == B, "stopped: a queued pattern is swapped in at once");
+            StepSequencer r; load(r, A); r.queueSwitch(B, 4); SeqSettings rec = st; rec.recording = true;
+            r.process(sr, 512, h, rec, buf, 8);
+            CHECK(r.takeSwitch(&live, outg, slot, false) && slot == 4, "record armed: swapped in at once as well");
+        }
+
+        // an empty queued pattern: the old note is released at the loop end, then silence, nothing stuck
+        {
+            SeqSettings c = st; c.loopLen = 4;
+            StepSequencer a; load(a, A);
+            auto p1 = run(a, c, bpm, sr, 512, queueAt, false); a.queueSwitch(std::string(), 7); auto p2 = run(a, c, bpm, sr, 512, 80000, false);
+            auto all = cat(p1, p2, queueAt);
+            bool lateOn = false; for (auto& x : all) if (x.on && x.pos >= 24000) lateOn = true;
+            CHECK(!lateOn && balanced(all) && (all.empty() || !all.back().on), "an empty queued slot: silence from the loop end on, no stuck note");
+            std::string live, outg; int slot = -1;
+            CHECK(a.takeSwitch(&live, outg, slot, false) && slot == 7 && live.empty() && outg == A, "...and it is reported (slot 8, empty live pattern)");
+        }
+
+        // replacing, cancelling, refreshing the waiting copy, and the refusal while a swap is uncollected
+        {
+            SeqSettings c = st; c.loopLen = 4;
+            const std::string C = text({50, 52, 54, 55}, [](StepSequencer&) {});
+            { StepSequencer a; load(a, A); run(a, c, bpm, sr, 512, queueAt, false); a.queueSwitch(B, 5); a.queueSwitch(C, 6);
+              auto p = run(a, c, bpm, sr, 512, 40000, false); std::string live, outg; int slot = -1;
+              auto ons = onsOf(p, 24000 - queueAt, 1LL << 40);
+              CHECK(!ons.empty() && ons[0].note == 50 && a.takeSwitch(&live, outg, slot, false) && slot == 6 && live == C, "a second click replaces the queued slot (C plays, slot 7)"); }
+            { StepSequencer a, b; load(a, A); load(b, A);
+              auto a1 = run(a, c, bpm, sr, 512, queueAt, false); a.queueSwitch(B, 5); a.cancelQueuedSwitch();
+              auto b1 = run(b, c, bpm, sr, 512, queueAt, false);
+              auto a2 = run(a, c, bpm, sr, 512, 60000, false), b2 = run(b, c, bpm, sr, 512, 60000, false);
+              std::string live, outg; int slot = -1;
+              CHECK(a.queuedSlot() == -1 && sameEv(a2, b2) && !a.takeSwitch(&live, outg, slot, false), "cancelled: nothing changes"); }
+            { StepSequencer a; load(a, A); run(a, c, bpm, sr, 512, queueAt, false); a.queueSwitch(B, 5);
+              CHECK(!a.replaceQueued(9, C) && a.replaceQueued(5, C), "replaceQueued only refreshes the slot that is waiting");
+              auto p = run(a, c, bpm, sr, 512, 40000, false); auto ons = onsOf(p, 24000 - queueAt, 1LL << 40);
+              CHECK(!ons.empty() && ons[0].note == 50, "...and the refreshed copy is the one that plays");
+              CHECK(!a.queueSwitch(B, 3), "a new queue is refused while the last swap has not been collected");
+              std::string live, outg; int slot = -1; a.takeSwitch(&live, outg, slot, false);
+              CHECK(a.queueSwitch(B, 3) && a.queuedSlot() == 3, "...and accepted after it was collected");
+              CHECK(!a.takeSwitch(&live, outg, slot, true) && a.queuedSlot() == -1, "takeSwitch(cancel) drops a waiting queue"); }
+        }
+
+        // STEP 1 and a queued switch together: the press makes the next step the start of a new pass, so the queued pattern comes in there
+        {
+            SeqSettings c = st; c.loopLen = 4; c.seed = 3;
+            StepSequencer a; load(a, A);
+            auto p1 = run(a, c, bpm, sr, 512, queueAt, false); a.queueSwitch(B, 5); a.requestStep1();
+            auto p2 = run(a, c, bpm, sr, 512, 60000, false);
+            StepSequencer f; load(f, B); auto fr = run(f, c, bpm, sr, 512, 60000, false);
+            auto all = cat(p1, p2, queueAt);
+            CHECK(sameOns(onsOf(all, 18000, 60000), onsOf(fr, 0, 60000 - 18000)), "STEP 1 + a queued switch: the queued pattern starts on the step after the press");
+        }
+
+        // after STEP 1 the loop end is counted from the press, not from the start of the run: with a loop of 4, STEP 1 comes on at 18000
+        // (step 4 of the old count), so the pass that began there ends at 18000 + 4 steps = 42000 (not at 48000, the next multiple of 4 counted from PLAY)
+        {
+            SeqSettings d = st; d.loopLen = 4; d.seed = 3;
+            StepSequencer b2; load(b2, A);
+            run(b2, d, bpm, sr, 512, 13000, false); b2.requestStep1();
+            run(b2, d, bpm, sr, 512, 7000, false); b2.queueSwitch(B, 5); // now at 20000, inside the step that started at 18000
+            auto q3 = run(b2, d, bpm, sr, 512, 60000, false);            // 20000 .. 80000
+            auto ons2 = onsOf(q3, 42000 - 20000, 1LL << 40);
+            bool noneBefore = true; for (auto& x : onsOf(q3, 0, 42000 - 20000)) if (x.note >= 72) noneBefore = false;
+            CHECK(noneBefore && !ons2.empty() && ons2[0].note == 72 && near(ons2[0].pos, 0), "STEP 1 at 18000, loop 4: the queued pattern comes in at 42000 (counted from the press), not at 48000 (counted from PLAY)");
+        }
+
+        // Logic sync, relocate: the pattern is bar-locked again, and its pass count starts over (B's 2-of-2 step is silent in the first pass after the jump)
+        {
+            SeqSettings c = st; c.loopLen = 4; c.seed = 3;
+            StepSequencer a; load(a, A);
+            const double ppqQ = (double) queueAt / 24000.0;
+            run(a, c, bpm, sr, 512, queueAt, true); a.queueSwitch(B, 2);
+            auto g2 = run(a, c, bpm, sr, 512, 70000, true, ppqQ, {{47104, 0.0}}); // jump back to the top of the bar
+            auto after = onsOf(g2, 47104, 47104 + 20000);
+            CHECK(after.size() >= 3 && after[0].note == 72 && near(after[0].pos, 0) && after[1].note == 76, "Logic sync, jump to the top: B's 2-of-2 step (74) is silent in the first pass after the jump (got %d, %d)", after.size() > 1 ? after[0].note : -1, after.size() > 1 ? after[1].note : -1);
+        }
+
+        // fuzz: random settings, random block sizes, random STEP 1 / queue / cancel / stop events, both sync modes: notes always alternate,
+        // nothing is left sounding after a stop, and every reported swap hands back what was live
+        {
+            std::mt19937 rng(20261009);
+            auto rnd = [&](int n) { return (int) (rng() % (unsigned) n); };
+            int swaps = 0, runs = 0;
+            for (int iter = 0; iter < 120; ++iter)
+            {
+                StepSequencer s;
+                std::string live0; { StepSequencer t; for (int i = 0, n = 1 + rnd(12); i < n; ++i) { if (rnd(5) == 0) t.addRest(); else t.recordNote(40 + rnd(40), 100); } live0 = t.serialize(); }
+                s.deserialize(live0);
+                SeqSettings c = st; c.direction = rnd(4); c.pendRepeat = rnd(2); c.loopLen = rnd(7); c.division = rnd(8); c.swing = 50.f + rnd(26); c.seed = rnd(2) ? rnd(9) : 0;
+                c.gate = 0.1f + 0.1f * rnd(10); c.prob = 0.5f + 0.1f * rnd(6);
+                const bool follow = rnd(3) == 0;
+                std::vector<Ev> all; long long t = 0; double ppq = 0; std::string expectLive = live0; bool stopped = false;
+                for (int step = 0; step < 40; ++step)
+                {
+                    const int blk = 1 + rnd(3000);
+                    switch (rnd(8))
+                    {
+                        case 0: s.requestStep1(); break;
+                        case 1: { StepSequencer t2; for (int i = 0, n = rnd(10); i < n; ++i) { if (rnd(4) == 0) t2.addRest(); else t2.recordNote(40 + rnd(40), 100); } s.queueSwitch(t2.serialize(), rnd(16)); break; }
+                        case 2: s.cancelQueuedSwitch(); break;
+                        case 3: stopped = !stopped; break;
+                        default: break;
+                    }
+                    SeqSettings cc = c; if (stopped) { cc.play = false; }
+                    auto e = run(s, cc, bpm, sr, 512, blk, follow && !stopped, ppq);
+                    // `run` starts the host position at `ppq`; keep it moving so Logic-sync runs are continuous
+                    ppq += blk * (bpm / 60.0 / sr);
+                    all = cat(all, e, t); t += blk;
+                    std::string lv, outg; int slot = -1;
+                    if (s.takeSwitch(&lv, outg, slot, false)) { ++swaps; CHECK(outg == expectLive, "fuzz: a reported swap hands back the pattern that was live"); expectLive = lv; }
+                    else CHECK(lv == expectLive, "fuzz: the live pattern is unchanged when no swap is reported");
+                }
+                ++runs;
+                int bal = 0; bool okAlt = true; for (auto& x : all) { bal += x.on ? 1 : -1; if (bal < 0 || bal > 1) okAlt = false; }
+                CHECK(okAlt, "fuzz run %d: notes alternate on / off", iter);
+                // a final stop releases whatever still sounds
+                SeqSettings off = c; off.play = false; off.followHost = false; SeqEvent buf[16]; SeqHostInfo h; h.bpm = bpm;
+                const int nEv = s.process(sr, 512, h, off, buf, 16); for (int i = 0; i < nEv; ++i) bal += buf[i].on ? 1 : -1;
+                CHECK(bal == 0, "fuzz run %d: nothing is left sounding after a stop (balance %d)", iter, bal);
+            }
+            printf("  (fuzz: %d runs, %d queued swaps carried out)\n", runs, swaps);
+            CHECK(swaps > 20, "fuzz: queued swaps were actually exercised (%d)", swaps);
+        }
+    }
+
     printf(failures ? "FAIL (%d)\n" : "PASS\n", failures);
     return failures ? 1 : 0;
 }

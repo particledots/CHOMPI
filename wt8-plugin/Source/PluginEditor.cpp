@@ -843,6 +843,14 @@ WT8Editor::WT8Editor(WT8AudioProcessor& p) : juce::AudioProcessorEditor(&p), pro
     addAndMakeVisible(copyBtn_);
     copyBtn_.onClick = [this] { setCopyMode(copyBtn_.getToggleState()); };
     copyBtn_.setClickingTogglesState(true);
+
+    // v0.13: RETRIG goes back to step 1 (the step that is sounding plays out first); AT LOOP END makes the slot buttons wait for the end of the loop
+    addAndMakeVisible(retrigBtn_);
+    retrigBtn_.onClick = [this] { proc_.requestStep1(); };
+    addAndMakeVisible(loopEndBtn_);
+    loopEndBtn_.setClickingTogglesState(true);
+    loopEndBtn_.setToggleState(proc_.getSlotAtLoopEnd(), juce::dontSendNotification);
+    loopEndBtn_.onClick = [this] { proc_.setSlotAtLoopEnd(loopEndBtn_.getToggleState()); refreshSlotButtons(); };
     refreshSlotButtons();
 
     // presets (header): the sound settings - INIT, the starter presets built into the plugin, and the files in the preset folder,
@@ -900,6 +908,8 @@ void WT8Editor::timerCallback()
     refreshTableControls();
     recBtn_.setToggleState(proc_.isSeqRecording(), juce::dontSendNotification);
     playBtn_.setEnabled(syncBox_.getSelectedItemIndex() == 0); // in "Logic" sync, Logic's transport is the play button
+    retrigBtn_.setEnabled(syncBox_.getSelectedItemIndex() == 0); // v0.13: like PLAY, a Free-sync control (in Logic sync the bar decides where step 1 is)
+    if (loopEndBtn_.getToggleState() != proc_.getSlotAtLoopEnd()) loopEndBtn_.setToggleState(proc_.getSlotAtLoopEnd(), juce::dontSendNotification); // a project was opened
     pendBtn_.setEnabled(dirBox_.getSelectedItemIndex() == 2);  // end-repeat only applies to the pendulum
 
     refreshSlotButtons();
@@ -1046,6 +1056,11 @@ void WT8Editor::loadTableFromFile()
 void SlotButton::paintButton(juce::Graphics& g, bool over, bool down)
 {
     juce::TextButton::paintButton(g, over, down);
+    if (queued) // v0.13: waiting for the end of the loop: an amber outline
+    {
+        g.setColour(kAccent);
+        g.drawRoundedRectangle(getLocalBounds().toFloat().reduced(1.0f), 4.0f, 2.0f);
+    }
     if (filled) // a small dot under the number: this slot holds a pattern
     {
         const float r = juce::jmax(1.5f, getHeight() * 0.075f);
@@ -1057,17 +1072,23 @@ void SlotButton::paintButton(juce::Graphics& g, bool over, bool down)
 void WT8Editor::refreshSlotButtons()
 {
     const int cur = proc_.getPatternSlot();
+    const int queued = proc_.getQueuedPatternSlot();
     for (int i = 0; i < WT8AudioProcessor::kPatternSlots; ++i)
     {
         const bool filled = proc_.patternSlotHasSteps(i);
         if (slotBtn_[i].filled != filled) { slotBtn_[i].filled = filled; slotBtn_[i].repaint(); }
+        if (slotBtn_[i].queued != (i == queued)) { slotBtn_[i].queued = (i == queued); slotBtn_[i].repaint(); }
         if (slotBtn_[i].getToggleState() != (i == cur)) slotBtn_[i].setToggleState(i == cur, juce::dontSendNotification);
     }
     // an empty pattern has nothing to copy; if it became empty while COPY was armed (CLEAR), the arming is dropped
     const bool canCopy = proc_.patternSlotHasSteps(cur);
     if (copyBtn_.isEnabled() != canCopy) copyBtn_.setEnabled(canCopy);
     if (!canCopy && copyBtn_.getToggleState()) setCopyMode(false);
-    if (copyBtn_.getToggleState()) patLabel_.setText("COPY " + juce::String(cur + 1) + " TO", juce::dontSendNotification);
+    // the label: COPY n TO while COPY is armed; NEXT n while a slot waits for the end of the loop; otherwise PATTERN
+    const juce::String label = copyBtn_.getToggleState() ? "COPY " + juce::String(cur + 1) + " TO"
+                             : queued >= 0               ? "NEXT " + juce::String(queued + 1)
+                                                         : juce::String("PATTERN");
+    if (patLabel_.getText() != label) patLabel_.setText(label, juce::dontSendNotification);
 }
 
 void WT8Editor::setCopyMode(bool on)
@@ -1085,7 +1106,7 @@ void WT8Editor::onSlotClicked(int slot)
         else copyCurrentSlotTo(slot);
         return;
     }
-    proc_.selectPatternSlot(slot);
+    proc_.requestPatternSlot(slot); // v0.13: at once, or queued for the end of the loop, depending on the AT LOOP END switch
     grid_.refresh();
     refreshSlotButtons();
 }
@@ -1399,6 +1420,8 @@ void WT8Editor::resized()
     put(xposeBtn_, 82); put(xposeReadout_, 52); put(xposeResetBtn_, 52);
     controls.removeFromLeft(int(14 * scale));
     put(octLabel_, 62); put(octBox_, 140);
+    controls.removeFromLeft(int(8 * scale));
+    put(retrigBtn_, 56); put(loopEndBtn_, 84); // v0.13
 
     // row D: which per-step value the grid shows and edits
     inner.removeFromTop(int(6 * scale));

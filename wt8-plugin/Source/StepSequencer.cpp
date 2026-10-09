@@ -157,10 +157,16 @@ int StepSequencer::conditionToIndex(int a, int b)
     return b == 1 ? 0 : b * (b - 1) / 2 + a - 1;
 }
 
-long long StepSequencer::passIndex(long long k, int L, int direction, bool pendRepeat)
+long long StepSequencer::passPeriod(int L, int direction, bool pendRepeat)
 {
     long long period = std::max(1, L);
     if (direction == 2 && L > 1) period = pendRepeat ? 2LL * L : 2LL * L - 2;
+    return period;
+}
+
+long long StepSequencer::passIndex(long long k, int L, int direction, bool pendRepeat)
+{
+    const long long period = passPeriod(L, direction, pendRepeat);
     return (k - posMod(k, period)) / period; // floor division, so counters before the start of the song stay consistent
 }
 
@@ -372,34 +378,34 @@ void applyTag(SeqStep& s, const std::string& f)
         default: break; // a tag from a later version: ignored
     }
 }
-} // namespace
 
-std::string StepSequencer::serialize() const
+// (v0.13: the text <-> steps conversion is a pair of plain functions, so a queued pattern can be parsed without the lock; the
+// code itself is unchanged from v0.12.)
+std::string serializeSteps(const SeqStep* steps, int len)
 {
-    Lock l(lock_);
     std::string out;
-    for (int i = 0; i < len_; ++i)
+    for (int i = 0; i < len; ++i)
     {
         // v0.3 format is "note:vel" or "r". v0.4 appends ":prob" (or "r:prob") only when the probability is not 100,
         // v0.6 appends tagged fields (see stepTags) only when they are not the default, so a pattern that does not
         // use them is saved exactly as before.
         if (i) out += ',';
-        const bool hasProb = steps_[i].prob != 100;
-        if (steps_[i].rest) out += hasProb ? "r:" + std::to_string((int) steps_[i].prob) : std::string("r");
+        const bool hasProb = steps[i].prob != 100;
+        if (steps[i].rest) out += hasProb ? "r:" + std::to_string((int) steps[i].prob) : std::string("r");
         else
         {
-            out += std::to_string((int) steps_[i].note) + ":" + std::to_string((int) steps_[i].vel);
-            if (hasProb) out += ":" + std::to_string((int) steps_[i].prob);
+            out += std::to_string((int) steps[i].note) + ":" + std::to_string((int) steps[i].vel);
+            if (hasProb) out += ":" + std::to_string((int) steps[i].prob);
         }
-        out += stepTags(steps_[i]);
+        out += stepTags(steps[i]);
     }
     return out;
 }
 
-void StepSequencer::deserialize(const std::string& text)
+void parseSteps(const std::string& text, SeqStep* steps_, int& len_)
 {
-    Lock l(lock_);
-    for (auto& s : steps_) s = SeqStep();
+    const int kMaxSteps = StepSequencer::kMaxSteps;
+    for (int i = 0; i < kMaxSteps; ++i) steps_[i] = SeqStep();
     len_ = 0;
     size_t pos = 0;
     while (pos <= text.size() && len_ < kMaxSteps && !text.empty())
@@ -451,7 +457,68 @@ void StepSequencer::deserialize(const std::string& text)
         steps_[len_++] = s;
         pos = end + 1;
     }
+}
+} // namespace
+
+std::string StepSequencer::serialize() const
+{
+    Lock l(lock_);
+    return serializeSteps(steps_, len_);
+}
+
+void StepSequencer::deserialize(const std::string& text)
+{
+    Lock l(lock_);
+    parseSteps(text, steps_, len_);
     displayIdx_.store(-1, std::memory_order_relaxed);
+}
+
+// ---- v0.13 -----------------------------------------------------------------------------------------------------------------
+bool StepSequencer::queueSwitch(const std::string& text, int slot)
+{
+    SeqStep tmp[kMaxSteps];
+    int n = 0;
+    parseSteps(text, tmp, n); // outside the lock: the audio thread should never wait for string work
+    Lock l(lock_);
+    if (switched_) return false;
+    for (int i = 0; i < kMaxSteps; ++i) queued_[i] = tmp[i];
+    queuedLen_ = n;
+    queuedSlot_.store(slot, std::memory_order_relaxed);
+    return true;
+}
+
+bool StepSequencer::replaceQueued(int slot, const std::string& text)
+{
+    SeqStep tmp[kMaxSteps];
+    int n = 0;
+    parseSteps(text, tmp, n);
+    Lock l(lock_);
+    if (queuedSlot_.load(std::memory_order_relaxed) != slot) return false;
+    for (int i = 0; i < kMaxSteps; ++i) queued_[i] = tmp[i];
+    queuedLen_ = n;
+    return true;
+}
+
+void StepSequencer::cancelQueuedSwitch()
+{
+    Lock l(lock_);
+    queuedSlot_.store(-1, std::memory_order_relaxed);
+}
+
+bool StepSequencer::takeSwitch(std::string* live, std::string& outgoing, int& newSlot, bool cancelQueue)
+{
+    Lock l(lock_);
+    if (live) *live = serializeSteps(steps_, len_);
+    const bool sw = switched_;
+    if (sw)
+    {
+        outgoing = serializeSteps(outgoing_, outgoingLen_);
+        newSlot = switchedSlot_;
+        switched_ = false;
+        switchedFlag_.store(false, std::memory_order_relaxed);
+    }
+    if (cancelQueue) queuedSlot_.store(-1, std::memory_order_relaxed);
+    return sw;
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -481,6 +548,8 @@ void StepSequencer::resetTransport()
     held_ = false;
     gateOffPpq_ = -1.0;
     ratNext_ = ratTotal_ = 0;
+    kOff_ = 0;
+    step1Pending_.store(false, std::memory_order_relaxed);
     displayIdx_.store(-1, std::memory_order_relaxed);
     running_.store(false, std::memory_order_relaxed);
 }
@@ -499,6 +568,19 @@ int StepSequencer::process(double sr, int numSamples, const SeqHostInfo& h, cons
         ratNext_ = ratTotal_ = 0; // repeats of a ratcheted step that have not started yet are cancelled with its note
     };
 
+    // v0.13: a pattern queued for the end of the loop is swapped in here, straight away, when the sequence is not running (stopped,
+    // record armed, or an empty pattern): there is no loop end to wait for.
+    auto swapInQueued = [&]() {
+        const int q = queuedSlot_.load(std::memory_order_relaxed);
+        if (q < 0) return;
+        for (int i = 0; i < kMaxSteps; ++i) { outgoing_[i] = steps_[i]; steps_[i] = queued_[i]; }
+        outgoingLen_ = len_; len_ = queuedLen_;
+        switchedSlot_ = q; switched_ = true;
+        switchedFlag_.store(true, std::memory_order_relaxed);
+        queuedSlot_.store(-1, std::memory_order_relaxed);
+        displayIdx_.store(-1, std::memory_order_relaxed);
+    };
+
     bool running = false;
     if (!s.recording && len_ > 0)
         running = s.followHost ? (h.hostPlaying && h.havePpq) : s.play;
@@ -508,6 +590,8 @@ int StepSequencer::process(double sr, int numSamples, const SeqHostInfo& h, cons
     {
         releaseHeld(0);
         wasRunning_ = false;
+        step1Pending_.store(false, std::memory_order_relaxed); // a STEP 1 request is for a sequence that is running now
+        swapInQueued();
         displayIdx_.store(-1, std::memory_order_relaxed);
         return n;
     }
@@ -516,7 +600,8 @@ int StepSequencer::process(double sr, int numSamples, const SeqHostInfo& h, cons
 
     const double bpm = h.bpm > 0.0 ? h.bpm : 120.0;
     const double pps = bpm / 60.0 / sr; // quarter notes per sample
-    if (!wasRunning_) runKey_ = nextRandom(); // SEED off: every start gets fresh random choices
+    if (!wasRunning_) { runKey_ = nextRandom(); kOff_ = 0; step1Pending_.store(false, std::memory_order_relaxed); } // SEED off: every start gets fresh random choices
+    if (s.followHost) step1Pending_.store(false, std::memory_order_relaxed); // STEP 1 is a Free-sync control: in Logic sync the bar decides
     double ppq0;
     if (s.followHost)
     {
@@ -525,6 +610,7 @@ int StepSequencer::process(double sr, int numSamples, const SeqHostInfo& h, cons
         {
             releaseHeld(0); // relocate / loop jump
             runKey_ = nextRandom(); // ...and so does every pass of a Logic cycle
+            kOff_ = 0; // ...and the pattern is locked to the bar again
         }
     }
     else
@@ -538,8 +624,9 @@ int StepSequencer::process(double sr, int numSamples, const SeqHostInfo& h, cons
     auto toOffset = [&](double p) { return (int) std::lround((p - ppq0) / pps); };
 
     // v0.4: the loop covers the first `loopLen` steps (0 = all); direction and probability use the same random key
-    const int loop = (s.loopLen <= 0) ? len_ : std::max(1, std::min(s.loopLen, len_));
-    const uint64_t key = s.seed > 0 ? mix64((uint64_t) s.seed) : runKey_;
+    auto loopFor = [&]() { return (s.loopLen <= 0) ? len_ : std::max(1, std::min(s.loopLen, len_)); };
+    int loop = loopFor();
+    uint64_t key = s.seed > 0 ? mix64((uint64_t) s.seed) : runKey_;
     const double globalProb = std::max(0.0, std::min(1.0, (double) s.prob));
 
     // v0.6 swing (MPC style): every second step (odd step counter) starts late. 50 % = straight, 66.7 % = a third of a
@@ -585,23 +672,38 @@ int StepSequencer::process(double sr, int numSamples, const SeqHostInfo& h, cons
         if (held_) { emit(off, false, heldNote_, 0); held_ = false; }
         gateOffPpq_ = -1.0;
         ratNext_ = ratTotal_ = 0;
-        const int idx = stepIndexFor(k, loop, s.direction, s.pendRepeat, key);
+        // v0.13: what the pattern does from here on is counted from kk, the step counter relative to where the current pattern started
+        // (kOff_ is 0 unless STEP 1 was pressed or a queued pattern was swapped in: then kk is 0 on this very step)
+        if (!s.followHost && step1Pending_.exchange(false, std::memory_order_relaxed))
+        {
+            kOff_ = k; // STEP 1: this step is step 1 of a new run through the pattern
+            if (s.seed <= 0) { runKey_ = nextRandom(); key = runKey_; } // SEED off: fresh random choices, as when PLAY is pressed
+        }
+        if (queuedSlot_.load(std::memory_order_relaxed) >= 0
+            && posMod(k - kOff_, passPeriod(loop, s.direction, s.pendRepeat)) == 0) // the pass through the loop ends here
+        {
+            swapInQueued();
+            kOff_ = k; // the queued pattern starts on its own first step
+            loop = loopFor();
+        }
+        const long long kk = k - kOff_;
+        const int idx = stepIndexFor(kk, loop, s.direction, s.pendRepeat, key);
         displayIdx_.store(idx, std::memory_order_relaxed);
         const SeqStep& st = steps_[idx];
         bool fire = !st.rest && !s.mute;
         if (fire && st.condB > 1) // v0.6 trigger condition ("pass a of every b"); a step that is not due behaves like a rest
-            fire = conditionPasses(st.condA, st.condB, passIndex(k, loop, s.direction, s.pendRepeat));
+            fire = conditionPasses(st.condA, st.condB, passIndex(kk, loop, s.direction, s.pendRepeat));
         if (fire)
         {
             const double p = (st.prob / 100.0) * globalProb;
-            if (p < 1.0 - 1e-9) fire = unitRandom(key, 2, k) < p; // a missed roll behaves like a rest
+            if (p < 1.0 - 1e-9) fire = unitRandom(key, 2, kk) < p; // a missed roll behaves like a rest
         }
         if (fire)
         {
             // v0.6 octave jump: its own roll (same key as the probability roll, different stream)
             int shift = 0;
-            if (st.octChance > 0 && unitRandom(key, 3, k) < st.octChance / 100.0)
-                shift = octaveShift(s.octMode, unitRandom(key, 4, k));
+            if (st.octChance > 0 && unitRandom(key, 3, kk) < st.octChance / 100.0)
+                shift = octaveShift(s.octMode, unitRandom(key, 4, kk));
             // v0.5: the note that sounds is the stored note, transposed (and octave-jumped), then snapped to the scale
             const int played = playedNote(st.note, s.transpose + shift, s.root, s.scale);
             int vel = st.vel;

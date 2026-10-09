@@ -106,6 +106,7 @@ class SlotButton : public juce::TextButton
     SlotButton() = default;
     void paintButton(juce::Graphics&, bool isMouseOverButton, bool isButtonDown) override;
     bool filled = false;
+    bool queued = false; // v0.13: this slot is waiting for the end of the loop (outlined)
 };
 
 /** The preset box. JUCE only reports a pick that changes the selection, so opening the list first clears the shown selection:
@@ -213,6 +214,8 @@ class WT8Editor : public juce::AudioProcessorEditor, private juce::Timer
     juce::Label patLabel_;            // "PATTERN", or "COPY n TO" while COPY is armed
     SlotButton slotBtn_[WT8AudioProcessor::kPatternSlots];
     juce::TextButton copyBtn_{"COPY"};
+    // v0.13: RETRIG = back to step 1 (Free sync); AT LOOP END = the slot buttons wait for the end of the loop instead of switching at once
+    juce::TextButton retrigBtn_{"RETRIG"}, loopEndBtn_{"AT LOOP END"};
     juce::ComboBox syncBox_, divBox_, dirBox_, scaleBox_, rootBox_, octBox_;
     juce::Label syncLabel_, divLabel_, laneLabel_, dirLabel_, scaleLabel_, rootLabel_, octLabel_, xposeReadout_;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> playAtt_, muteAtt_, pendAtt_, xposeAtt_;
