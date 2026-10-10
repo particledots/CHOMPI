@@ -660,7 +660,8 @@ WT8Editor::Knob& WT8Editor::addKnob(const juce::String& id, const juce::String& 
     s.setLookAndFeel(&laf_);
 
     // Attach first: the attachment installs its own text functions, which we then replace.
-    k->attach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(proc_.apvts, id, s);
+    if (proc_.apvts.getParameter(id) != nullptr) // (the MIDI effect build has no sound parameters: its hidden knobs stay unattached)
+        k->attach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(proc_.apvts, id, s);
 
     switch (kind)
     {
@@ -824,11 +825,14 @@ WT8Editor::WT8Editor(WT8AudioProcessor& p) : juce::AudioProcessorEditor(&p), pro
     fillCombo(rootBox_, "seq_root");
     fillCombo(octBox_, "seq_octmode");
     fillCombo(filterTypeBox_, "filtertype");
-    filterTypeAtt_ = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(proc_.apvts, "filtertype", filterTypeBox_);
+    if (proc_.apvts.getParameter("filtertype") != nullptr)
+        filterTypeAtt_ = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(proc_.apvts, "filtertype", filterTypeBox_);
     fillCombo(pitchShapeBox_, "pitchlfoshape");
     fillCombo(filterShapeBox_, "filterlfoshape");
-    pitchShapeAtt_ = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(proc_.apvts, "pitchlfoshape", pitchShapeBox_);
-    filterShapeAtt_ = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(proc_.apvts, "filterlfoshape", filterShapeBox_);
+    if (proc_.apvts.getParameter("pitchlfoshape") != nullptr)
+        pitchShapeAtt_ = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(proc_.apvts, "pitchlfoshape", pitchShapeBox_);
+    if (proc_.apvts.getParameter("filterlfoshape") != nullptr)
+        filterShapeAtt_ = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(proc_.apvts, "filterlfoshape", filterShapeBox_);
     octAtt_ = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(proc_.apvts, "seq_octmode", octBox_);
     scaleAtt_ = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(proc_.apvts, "seq_scale", scaleBox_);
     rootAtt_ = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(proc_.apvts, "seq_root", rootBox_);
@@ -1040,6 +1044,7 @@ void WT8Editor::timerCallback()
 // ---- v0.10 user wavetables -------------------------------------------------------------------------------------------
 void WT8Editor::refreshTableControls()
 {
+    if (proc_.apvts.getRawParameterValue("table") == nullptr) return; // the MIDI effect build has no wavetable
     const int slot = juce::jlimit(0, WT8AudioProcessor::kTableSlots - 1, juce::roundToInt(proc_.apvts.getRawParameterValue("table")->load()) - 1);
     const bool user = proc_.slotHasUserTable(slot);
     const juce::String label = user ? "USER: " + proc_.userTableName(slot) : juce::String("WAVETABLE");

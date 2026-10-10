@@ -55,6 +55,17 @@ int main()
         check(p->isMidiEffect() && p->producesMidi() && p->acceptsMidi(), "reports itself as a MIDI effect that produces MIDI");
         check(p->getName() == "dotriaconta-tone" && p->getTailLengthSeconds() == 0.0, "named 'dotriaconta-tone', no tail");
         check(p->getTotalNumInputChannels() == 0 && p->getTotalNumOutputChannels() == 0, "no audio channels");
+        bool soundGone = true;
+        for (const char* id : {"table", "cycle", "octave", "pitch", "attack", "release", "cutoff", "resonance", "fx", "fxtime", "pitchlfodepth", "pitchlforate",
+                               "filterlfodepth", "filterlforate", "gain", "pan", "comp", "output", "pitchlfoshape", "filterlfoshape", "filtertype", "filterkey",
+                               "filtervel", "filterenv", "filterdecay"})
+            if (p->apvts.getParameter(id) != nullptr) soundGone = false;
+        check(soundGone, "none of the 25 sound parameters exist (the host's automation list shows sequencer parameters only)");
+        bool seqThere = true;
+        for (const char* id : {"seq_play", "seq_sync", "seq_div", "seq_gate", "seq_mute", "seq_loop", "seq_dir", "seq_prob", "seq_seed", "seq_scale", "seq_root", "seq_xpose", "seq_swing", "seq_accent", "seq_octmode", "seq_pendrep"})
+            if (p->apvts.getParameter(id) == nullptr) seqThere = false;
+        check(seqThere, "the sequencer parameters are all there");
+        printf("  (%d parameters in total)\n", (int) p->getParameters().size());
     }
 
     // the pattern plays out as MIDI
@@ -122,6 +133,18 @@ int main()
         p->setSeqRecording(true);
         const auto ev = run(*p, 2, [&](int blk, juce::MidiBuffer& m) { if (blk == 0) { m.addEvent(juce::MidiMessage::noteOn(1, 65, (juce::uint8) 80), 0); m.addEvent(juce::MidiMessage::noteOff(1, 65), 100); } });
         check(ev.size() == 2 && ev[0].note == 65 && p->sequencer().length() == 1, "REC: the key passes through and becomes a step");
+    }
+
+    // a state that carries sound parameters (saved by ipmohc, or by the first draft) still loads; the sequencer part comes back
+    {
+        auto p = makeProc();
+        for (int n : {60, 64, 67}) p->sequencer().recordNote(n, 100);
+        juce::MemoryBlock mb; p->getStateInformation(mb);
+        auto xml = juce::AudioProcessor::getXmlFromBinary(mb.getData(), (int) mb.getSize());
+        auto* extra = xml->createNewChildElement("PARAM"); extra->setAttribute("id", "cutoff"); extra->setAttribute("value", 0.2);
+        juce::MemoryBlock mb2; juce::AudioProcessor::copyXmlToBinary(*xml, mb2);
+        auto q = makeProc(); q->setStateInformation(mb2.getData(), (int) mb2.getSize());
+        check(q->sequencer().serialize() == p->sequencer().serialize(), "a state with a sound parameter in it (as the first draft saved) still loads, pattern intact");
     }
 
     // saved with the project

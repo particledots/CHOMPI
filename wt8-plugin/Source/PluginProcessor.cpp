@@ -41,6 +41,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout WT8AudioProcessor::createLay
 {
     juce::AudioProcessorValueTreeState::ParameterLayout l;
     // Ids are stable (saved in projects). Ranges/defaults follow the CHOMPI WAVE panel.
+#if !WT8_MIDI_FX // the MIDI effect build has the sequencer parameters only
     l.add(i("table", "Wavetable", 1, WT8Engine::kNumTables, 1));
     l.add(i("cycle", "Frame", 0, WT8Engine::kMaxCycle, 0));
     l.add(i("octave", "Octave", -1, 1, 0));
@@ -59,6 +60,8 @@ juce::AudioProcessorValueTreeState::ParameterLayout WT8AudioProcessor::createLay
     l.add(f("pan", "Pan", 0.f, 1.f, 0.5f));
     l.add(f("comp", "Compressor <-> Saturation", 0.f, 1.f, 0.f));
     l.add(f("output", "Output Boost (dB)", -12.f, 36.f, 20.f));
+
+#endif
 
     // Step sequencer. (Ids are stable; new ones only ever get added.)
     juce::StringArray divisions;
@@ -95,6 +98,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout WT8AudioProcessor::createLay
     l.add(f("seq_accent", "Seq Accent", 0.f, 1.f, 0.3f, 4));    // velocity added to accented steps (1 = +127)
     l.add(c("seq_octmode", "Seq Octave Jump", octModes, 0, 4)); // which jump a step makes when its octave-jump roll succeeds
 
+#if !WT8_MIDI_FX
     // v0.17 LFO shapes. Version hint 5: added after v0.16 shipped. Item 0 = Triangle, which is what both LFOs always were.
     const juce::StringArray lfoShapes{"Triangle", "Sine", "Saw down", "Saw up", "Square"};
     l.add(c("pitchlfoshape", "Pitch LFO Shape", lfoShapes, 0, 5));
@@ -108,6 +112,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout WT8AudioProcessor::createLay
     // v0.20 filter envelope. Version hint 7. Amount 0 (the default) = no envelope.
     l.add(f("filterenv", "Filter Envelope Amount", -1.f, 1.f, 0.f, 7));
     l.add(f("filterdecay", "Filter Envelope Decay", 0.f, 1.f, 0.4f, 7));
+#endif
     return l;
 }
 
