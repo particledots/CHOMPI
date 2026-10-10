@@ -761,6 +761,7 @@ WT8Editor::WT8Editor(WT8AudioProcessor& p) : juce::AudioProcessorEditor(&p), pro
     auto& pan     = addKnob("pan",    "PAN",   Kind::Pan, true);
     auto& boost   = addKnob("output", "BOOST", Kind::Decibels, true);
 
+    lfoKnobs_[0] = &plfoD; lfoKnobs_[1] = &plfoR; lfoKnobs_[2] = &flfoD; lfoKnobs_[3] = &flfoR;
     row1_.push_back({"OSCILLATOR", {&table, &frame, &octave, &pitch}, {}, 2});
     row1_.push_back({"ENVELOPE",   {&attack, &release}, {}});
     row1_.push_back({"FILTER",     {&cutoff, &reso}, {}});
@@ -808,6 +809,10 @@ WT8Editor::WT8Editor(WT8AudioProcessor& p) : juce::AudioProcessorEditor(&p), pro
     fillCombo(scaleBox_, "seq_scale");
     fillCombo(rootBox_, "seq_root");
     fillCombo(octBox_, "seq_octmode");
+    fillCombo(pitchShapeBox_, "pitchlfoshape");
+    fillCombo(filterShapeBox_, "filterlfoshape");
+    pitchShapeAtt_ = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(proc_.apvts, "pitchlfoshape", pitchShapeBox_);
+    filterShapeAtt_ = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(proc_.apvts, "filterlfoshape", filterShapeBox_);
     octAtt_ = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(proc_.apvts, "seq_octmode", octBox_);
     scaleAtt_ = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(proc_.apvts, "seq_scale", scaleBox_);
     rootAtt_ = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(proc_.apvts, "seq_root", rootBox_);
@@ -1453,6 +1458,21 @@ void WT8Editor::resized()
         loadTableBtn_.setBounds(strip.removeFromLeft(bw).reduced(0, int(1 * scale)));
         strip.removeFromLeft(int(6 * scale));
         resetTableBtn_.setBounds(strip.reduced(0, int(1 * scale)));
+    }
+
+    // v0.17: the LFO shape boxes sit under the knob pairs (the four knobs give up the bottom strip)
+    if (lfoKnobs_[0] != nullptr)
+    {
+        juce::Rectangle<int> strips[4];
+        for (int n = 0; n < 4; ++n)
+        {
+            auto b = lfoKnobs_[n]->slider.getBounds();
+            strips[n] = b.removeFromBottom(int(28 * scale));
+            lfoKnobs_[n]->slider.setBounds(b);
+        }
+        const int pad = int(6 * scale);
+        pitchShapeBox_.setBounds(strips[0].getUnion(strips[1]).reduced(pad, int(2 * scale)));
+        filterShapeBox_.setBounds(strips[2].getUnion(strips[3]).reduced(pad, int(2 * scale)));
     }
 
     // ---- sequencer strip ----

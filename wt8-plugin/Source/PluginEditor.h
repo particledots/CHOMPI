@@ -182,6 +182,9 @@ class WT8Editor : public juce::AudioProcessorEditor, private juce::Timer
     TableView tableView_;
     int shownTableSlot_ = -1, shownTableRevision_ = -1, shownTableFrame_ = -1;
     Knob* tableKnob_ = nullptr;
+    Knob* lfoKnobs_[4] = {nullptr, nullptr, nullptr, nullptr}; // v0.17: pitch depth, pitch rate, filter depth, filter rate (shape boxes sit under them)
+    juce::ComboBox pitchShapeBox_, filterShapeBox_;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> pitchShapeAtt_, filterShapeAtt_;
     juce::String shownTableLabel_;
     std::unique_ptr<juce::FileChooser> tableChooser_;
 

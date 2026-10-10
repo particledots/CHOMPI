@@ -32,6 +32,8 @@ class WT8Engine
         float pitchLfoRate   = 0.58f; // 0..1
         float filterLfoDepth = 0.f;   // 0..1
         float filterLfoRate  = 0.58f; // 0..1
+        int   pitchLfoShape  = 0;     // v0.17: 0 triangle (as before), 1 sine, 2 saw down, 3 saw up, 4 square
+        int   filterLfoShape = 0;     // v0.17: same
         float gain           = 0.84f; // 0..1
         float pan            = 0.5f;  // 0..1
         float comp           = 0.f;   // 0..1  (<.5 compressor, >.5 saturation)

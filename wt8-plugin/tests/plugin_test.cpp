@@ -10,6 +10,7 @@
 #include <chrono>
 #include <memory>
 #include <thread>
+#include <tuple>
 #include <vector>
 
 static float rms(const juce::AudioBuffer<float>& b, int ch)
@@ -1605,7 +1606,98 @@ int main()
         printf("v0.16 slot chaining: %s\n", v16Ok ? "ok" : "FAILED");
     }
 
-    bool ok = seqOk && v4Ok && v5Ok && v6Ok && v8Ok && v9Ok && v10Ok && v13Ok && v14Ok && v16Ok && finite && peak > 0.02f && peak <= 1.5f && held > 0.005f && tail < held * 0.05f && std::fabs(cutoff - 0.2f) < 0.01f;
+    // ---- v0.17: LFO shapes through the real processor ----
+    bool v17Ok = true;
+    {
+        auto check = [&](bool cond, const char* what) { printf("  %s: %s\n", cond ? "ok  " : "FAIL", what); v17Ok = v17Ok && cond; };
+        auto makeProc = [&]() { auto pr = std::make_unique<WT8AudioProcessor>(); pr->setPlayConfigDetails(0, 2, sr, bs); pr->prepareToPlay(sr, bs); return pr; };
+        auto setN = [&](WT8AudioProcessor& pr, const char* id, float real) { auto* q = pr.apvts.getParameter(id); q->setValueNotifyingHost(q->convertTo0to1(real)); };
+        auto getN = [&](WT8AudioProcessor& pr, const char* id) { return pr.apvts.getRawParameterValue(id)->load(); };
+        // one held note, `blocks` blocks, left channel; pitchShape / filterShape < 0 = leave at the default
+        auto render = [&](int pitchShape, int filterShape, bool pitchDepth, bool filterDepth, bool noteOn = true) {
+            auto pr = makeProc();
+            if (pitchShape >= 0) setN(*pr, "pitchlfoshape", (float) pitchShape);
+            if (filterShape >= 0) setN(*pr, "filterlfoshape", (float) filterShape);
+            setN(*pr, "pitchlfodepth", pitchDepth ? 1.f : 0.f); setN(*pr, "filterlfodepth", filterDepth ? 1.f : 0.f);
+            setN(*pr, "pitchlforate", 0.45f); setN(*pr, "filterlforate", 0.45f);
+            setN(*pr, "cutoff", 0.35f);
+            juce::AudioBuffer<float> b(2, bs); juce::MidiBuffer m, none;
+            if (noteOn) m.addEvent(juce::MidiMessage::noteOn(1, 57, (juce::uint8) 100), 0);
+            std::vector<float> out; bool fin = true; float pk = 0;
+            for (int blk = 0; blk < 400; ++blk)
+            {
+                b.clear(); pr->processBlock(b, blk == 0 ? m : none);
+                for (int i = 0; i < bs; ++i) { const float v = b.getSample(0, i); if (!std::isfinite(v)) fin = false; pk = std::fmax(pk, std::fabs(v)); out.push_back(v); }
+            }
+            return std::make_tuple(out, fin, pk);
+        };
+        auto diff = [](const std::vector<float>& a, const std::vector<float>& c) { float d = 0; for (size_t i = 0; i < a.size() && i < c.size(); ++i) d = std::fmax(d, std::fabs(a[i] - c[i])); return d; };
+
+        auto keepProc = makeProc();
+        auto* ps = dynamic_cast<juce::AudioParameterChoice*>(keepProc->apvts.getParameter("pitchlfoshape"));
+        check(ps != nullptr && ps->choices.size() == 5 && ps->choices[0] == "Triangle", "pitch LFO shape: 5 choices, the first is Triangle");
+        { auto pr = makeProc(); check(getN(*pr, "pitchlfoshape") == 0.f && getN(*pr, "filterlfoshape") == 0.f, "both shapes default to Triangle (= what the LFOs always were)"); }
+
+        for (int which = 0; which < 2; ++which)
+        {
+            const bool pitchLfo = which == 0;
+            const char* nm = pitchLfo ? "pitch" : "filter";
+            auto [base, f0, p0] = render(-1, -1, pitchLfo, !pitchLfo);                      // defaults
+            auto [tri, f1, p1] = render(pitchLfo ? 0 : -1, pitchLfo ? -1 : 0, pitchLfo, !pitchLfo); // Triangle set explicitly
+            check(f0 && p0 > 0.01f, (std::string(nm) + " LFO: the default renders a finite, audible note").c_str());
+            check(diff(base, tri) == 0.f, (std::string(nm) + " LFO: Triangle chosen explicitly is bit-identical to the default (old projects sound the same)").c_str());
+            auto [nolfo, f2, p2] = render(-1, -1, false, false);
+            check(diff(base, nolfo) > 0.01f, (std::string(nm) + " LFO: the LFO audibly does something at full depth (so the shape test means something)").c_str());
+            std::vector<std::vector<float>> shapes;
+            for (int sh = 1; sh <= 4; ++sh)
+            {
+                auto [o, ff, pp] = render(pitchLfo ? sh : -1, pitchLfo ? -1 : sh, pitchLfo, !pitchLfo);
+                check(ff && pp > 0.01f && pp < 4.f, (std::string(nm) + " LFO shape " + std::to_string(sh) + ": finite, audible, bounded").c_str());
+                check(diff(o, base) > 0.01f, (std::string(nm) + " LFO shape " + std::to_string(sh) + " differs from Triangle").c_str());
+                shapes.push_back(o);
+            }
+            bool distinct = true;
+            for (size_t a = 0; a < shapes.size(); ++a) for (size_t c = a + 1; c < shapes.size(); ++c) if (diff(shapes[a], shapes[c]) < 0.01f) distinct = false;
+            check(distinct, (std::string(nm) + " LFO: the four other shapes also differ from each other").c_str());
+            // the shape of an LFO that has depth 0 changes nothing
+            auto [z, fz, pz] = render(pitchLfo ? 4 : -1, pitchLfo ? -1 : 4, false, false);
+            check(diff(z, nolfo) == 0.f, (std::string(nm) + " LFO: a shape does nothing while its depth is 0").c_str());
+        }
+        // the shape of one LFO does not change the other one
+        { auto [a, fa, pa] = render(-1, -1, true, false); auto [c, fc, pc] = render(-1, 4, true, false);
+          check(diff(a, c) == 0.f, "the filter LFO shape leaves a pitch-LFO-only sound unchanged"); }
+
+        // saved with the project; an old project (no shape properties) comes back as Triangle whatever this instance had
+        {
+            auto src = makeProc(); setN(*src, "pitchlfoshape", 4.f); setN(*src, "filterlfoshape", 2.f);
+            juce::MemoryBlock saved; src->getStateInformation(saved);
+            auto dst = makeProc(); dst->setStateInformation(saved.getData(), (int) saved.getSize());
+            check(getN(*dst, "pitchlfoshape") == 4.f && getN(*dst, "filterlfoshape") == 2.f, "the two shapes are saved with the project");
+            auto xml = juce::AudioProcessor::getXmlFromBinary(saved.getData(), (int) saved.getSize());
+            for (auto* id : {"pitchlfoshape", "filterlfoshape"})
+                while (auto* ch = xml->getChildByAttribute("id", id)) xml->removeChildElement(ch, true);
+            juce::MemoryBlock oldState; juce::AudioProcessor::copyXmlToBinary(*xml, oldState);
+            auto target = makeProc(); setN(*target, "pitchlfoshape", 3.f); setN(*target, "filterlfoshape", 1.f);
+            target->setStateInformation(oldState.getData(), (int) oldState.getSize());
+            check(getN(*target, "pitchlfoshape") == 0.f && getN(*target, "filterlfoshape") == 0.f, "a project from before v0.17: both shapes are Triangle");
+        }
+        // changing the shape while a note sounds stays finite
+        {
+            auto pr = makeProc(); setN(*pr, "pitchlfodepth", 1.f); setN(*pr, "filterlfodepth", 1.f);
+            juce::AudioBuffer<float> b(2, bs); juce::MidiBuffer m, none; m.addEvent(juce::MidiMessage::noteOn(1, 60, (juce::uint8) 100), 0);
+            bool fin = true;
+            for (int blk = 0; blk < 300; ++blk)
+            {
+                if (blk % 7 == 0) { setN(*pr, "pitchlfoshape", (float) (blk / 7 % 5)); setN(*pr, "filterlfoshape", (float) ((blk / 7 + 2) % 5)); }
+                b.clear(); pr->processBlock(b, blk == 0 ? m : none);
+                for (int i = 0; i < bs; ++i) if (!std::isfinite(b.getSample(0, i))) fin = false;
+            }
+            check(fin, "switching both shapes every few blocks while a note sounds stays finite");
+        }
+        printf("v0.17 LFO shapes: %s\n", v17Ok ? "ok" : "FAILED");
+    }
+
+    bool ok = seqOk && v4Ok && v5Ok && v6Ok && v8Ok && v9Ok && v10Ok && v13Ok && v14Ok && v16Ok && v17Ok && finite && peak > 0.02f && peak <= 1.5f && held > 0.005f && tail < held * 0.05f && std::fabs(cutoff - 0.2f) < 0.01f;
     printf(ok ? "PASS\n" : "FAIL\n");
     return ok ? 0 : 1;
 }

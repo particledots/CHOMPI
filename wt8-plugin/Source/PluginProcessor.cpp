@@ -94,6 +94,11 @@ juce::AudioProcessorValueTreeState::ParameterLayout WT8AudioProcessor::createLay
     l.add(f("seq_swing", "Seq Swing", 50.f, 75.f, 50.f, 4));    // 50 = straight, 66.7 = triplet feel, 75 = dotted
     l.add(f("seq_accent", "Seq Accent", 0.f, 1.f, 0.3f, 4));    // velocity added to accented steps (1 = +127)
     l.add(c("seq_octmode", "Seq Octave Jump", octModes, 0, 4)); // which jump a step makes when its octave-jump roll succeeds
+
+    // v0.17 LFO shapes. Version hint 5: added after v0.16 shipped. Item 0 = Triangle, which is what both LFOs always were.
+    const juce::StringArray lfoShapes{"Triangle", "Sine", "Saw down", "Saw up", "Square"};
+    l.add(c("pitchlfoshape", "Pitch LFO Shape", lfoShapes, 0, 5));
+    l.add(c("filterlfoshape", "Filter LFO Shape", lfoShapes, 0, 5));
     return l;
 }
 
@@ -275,6 +280,8 @@ void WT8AudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
     p.pitchLfoRate   = *apvts.getRawParameterValue("pitchlforate");
     p.filterLfoDepth = *apvts.getRawParameterValue("filterlfodepth");
     p.filterLfoRate  = *apvts.getRawParameterValue("filterlforate");
+    p.pitchLfoShape  = (int) *apvts.getRawParameterValue("pitchlfoshape");
+    p.filterLfoShape = (int) *apvts.getRawParameterValue("filterlfoshape");
     p.gain           = *apvts.getRawParameterValue("gain");
     p.pan            = *apvts.getRawParameterValue("pan");
     p.comp           = *apvts.getRawParameterValue("comp");

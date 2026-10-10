@@ -523,6 +523,19 @@ class myEngine {
     bool getPitchLfoOn() { return pitch_lfo_on; }
     bool getFilterLfoOn() { return filter_lfo_on; }
 
+    // v0.17: LFO shape. 0 = triangle (what both LFOs always were), 1 = sine, 2 = saw down, 3 = saw up, 4 = square.
+    static uint8_t lfoWaveFor(int shape) {
+        switch (shape) {
+            case 1: return Oscillator::WAVE_SIN;
+            case 2: return Oscillator::WAVE_SAW;
+            case 3: return Oscillator::WAVE_RAMP;
+            case 4: return Oscillator::WAVE_SQUARE;
+            default: return Oscillator::WAVE_TRI;
+        }
+    }
+    void setPitchLfoShape(int shape) { pitchLfo.SetWaveform(lfoWaveFor(shape)); }
+    void setFilterLfoShape(int shape) { filterLfo.SetWaveform(lfoWaveFor(shape)); }
+
     void setPitchLfoDepth(float amount) {
         pitchLfo.SetAmp(amount);
     }
