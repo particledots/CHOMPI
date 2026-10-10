@@ -16,6 +16,10 @@ class IpmohcLookAndFeel : public juce::LookAndFeel_V4
     juce::Font getLabelFont(juce::Label&) override;
     juce::Font getTextButtonFont(juce::TextButton&, int buttonHeight) override;
     juce::Font getComboBoxFont(juce::ComboBox&) override;
+    // v0.15: JUCE reserves a fixed 30 px for the arrow, so at the small window sizes (boxes < 50 px) almost no room was left for the text
+    void drawComboBox(juce::Graphics&, int width, int height, bool isButtonDown, int buttonX, int buttonY,
+                      int buttonW, int buttonH, juce::ComboBox&) override;
+    void positionComboBoxText(juce::ComboBox&, juce::Label&) override;
 };
 
 // 32 clickable steps (2 rows of 16, or since v0.7 optionally one ring of 16 per page, or two rings side by side) with seven lanes.
@@ -222,6 +226,8 @@ class WT8Editor : public juce::AudioProcessorEditor, private juce::Timer
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> syncAtt_, divAtt_, dirAtt_, scaleAtt_, rootAtt_, octAtt_;
     std::vector<Knob*> seqKnobs_; // GATE PROB / LOOP SEED / SWING ACCENT (2 columns x 3 rows at the right of the strip)
     juce::Rectangle<int> seqBounds_;
+    std::vector<juce::Rectangle<int>> seqDividers_; // v0.15: thin lines between control groups in a sequencer row
+    juce::Label rowEditLabel_, rowPlayLabel_;       // v0.15 (six-row layout only): captions for the two new rows
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(WT8Editor)
 };

@@ -15,6 +15,9 @@ juce::Font makeFont(float height, bool bold = false)
 {
     return juce::Font(juce::FontOptions(height, bold ? juce::Font::bold : juce::Font::plain));
 }
+
+// v0.15: six sequencer rows (EDIT, PLAY, DIRECTION, SCALE, LANE, PATTERN) make the window 36 px taller than v0.14 (840 x 898)
+constexpr int kWindowW = 840, kWindowH = 934;
 } // namespace
 
 // ---------------------------------------------------------------------------------------------
@@ -47,6 +50,35 @@ IpmohcLookAndFeel::IpmohcLookAndFeel()
 
 juce::Font IpmohcLookAndFeel::getTextButtonFont(juce::TextButton&, int h) { return makeFont(juce::jmax(9.0f, h * 0.42f), true); }
 juce::Font IpmohcLookAndFeel::getComboBoxFont(juce::ComboBox& c) { return makeFont(juce::jmax(9.0f, c.getHeight() * 0.46f)); }
+
+// v0.15: same drawing as JUCE's LookAndFeel_V4, but the arrow area is min(30, box height) px instead of a fixed 30 px.
+// At 30 px high (the default size) this is identical to before; in smaller boxes the text gets the room back.
+void IpmohcLookAndFeel::drawComboBox(juce::Graphics& g, int width, int height, bool, int, int, int, int, juce::ComboBox& box)
+{
+    const float corner = 3.0f;
+    const juce::Rectangle<float> boxBounds(0.0f, 0.0f, (float) width, (float) height);
+    g.setColour(box.findColour(juce::ComboBox::backgroundColourId));
+    g.fillRoundedRectangle(boxBounds, corner);
+    g.setColour(box.findColour(juce::ComboBox::outlineColourId));
+    g.drawRoundedRectangle(boxBounds.reduced(0.5f), corner, 1.0f);
+
+    const float a = (float) juce::jmin(30, height);
+    const float k = a / 30.0f;
+    const juce::Rectangle<float> arrowZone((float) width - a, 0.0f, 20.0f * k, (float) height);
+    juce::Path path;
+    path.startNewSubPath(arrowZone.getX() + 3.0f * k, arrowZone.getCentreY() - 2.0f * k);
+    path.lineTo(arrowZone.getCentreX(), arrowZone.getCentreY() + 3.0f * k);
+    path.lineTo(arrowZone.getRight() - 3.0f * k, arrowZone.getCentreY() - 2.0f * k);
+    g.setColour(box.findColour(juce::ComboBox::arrowColourId).withAlpha(box.isEnabled() ? 0.9f : 0.2f));
+    g.strokePath(path, juce::PathStrokeType(juce::jmax(1.4f, 2.0f * k)));
+}
+
+void IpmohcLookAndFeel::positionComboBoxText(juce::ComboBox& box, juce::Label& label)
+{
+    label.setBounds(1, 1, box.getWidth() - juce::jmin(30, box.getHeight()), box.getHeight() - 2);
+    label.setBorderSize(juce::BorderSize<int>(1, 5, 1, 0)); // JUCE's default is 5 px on both sides; the right one only wasted room next to the arrow
+    label.setFont(getComboBoxFont(box));
+}
 
 juce::Font IpmohcLookAndFeel::getLabelFont(juce::Label& l)
 {
@@ -822,7 +854,7 @@ WT8Editor::WT8Editor(WT8AudioProcessor& p) : juce::AudioProcessorEditor(&p), pro
     xposeReadout_.getProperties().set("fontHeight", 13.0f);
     xposeReadout_.setInterceptsMouseClicks(false, false);
 
-    for (auto* l : {&syncLabel_, &divLabel_, &laneLabel_, &dirLabel_, &scaleLabel_, &rootLabel_, &octLabel_})
+    for (auto* l : {&syncLabel_, &divLabel_, &laneLabel_, &dirLabel_, &scaleLabel_, &rootLabel_, &octLabel_, &rowEditLabel_, &rowPlayLabel_})
     {
         l->setJustificationType(juce::Justification::centredRight);
         l->setColour(juce::Label::textColourId, kDim);
@@ -832,7 +864,9 @@ WT8Editor::WT8Editor(WT8AudioProcessor& p) : juce::AudioProcessorEditor(&p), pro
     }
     syncLabel_.setText("SYNC", juce::dontSendNotification);
     divLabel_.setText("STEP", juce::dontSendNotification);
-    laneLabel_.setText("EDIT", juce::dontSendNotification);
+    laneLabel_.setText("LANE", juce::dontSendNotification); // v0.15: was "EDIT"; EDIT is now the caption of the REC / REST / DEL / CLEAR / RANDOM row
+    rowEditLabel_.setText("EDIT", juce::dontSendNotification);
+    rowPlayLabel_.setText("PLAY", juce::dontSendNotification);
     dirLabel_.setText("DIRECTION", juce::dontSendNotification);
     scaleLabel_.setText("SCALE", juce::dontSendNotification);
     rootLabel_.setText("ROOT", juce::dontSendNotification);
@@ -897,9 +931,9 @@ WT8Editor::WT8Editor(WT8AudioProcessor& p) : juce::AudioProcessorEditor(&p), pro
     addAndMakeVisible(grid_);
 
     setResizable(true, true);
-    setResizeLimits(630, 674, 1260, 1347); // v0.9: 840 x 898 (was 840 x 862 in v0.7 / v0.8): one more row, for the 16 pattern-slot buttons
-    getConstrainer()->setFixedAspectRatio(840.0 / 898.0);
-    setSize(840, 898);
+    setResizeLimits(630, int(630.0 * kWindowH / kWindowW), 1260, int(1260.0 * kWindowH / kWindowW)); // 630 x 700 .. 1260 x 1401 (v0.9-v0.14: 840 x 898; v0.15: one more row, 840 x 934)
+    getConstrainer()->setFixedAspectRatio((double) kWindowW / kWindowH);
+    setSize(kWindowW, kWindowH);
     grid_.refresh();
     timerCallback(); // fill in the transpose readout and scale state straight away
     // v0.10: LOAD / RESET under the WAVETABLE knob
@@ -1312,6 +1346,8 @@ void WT8Editor::paint(juce::Graphics& g)
     for (auto& grp : row2_) drawGroup(grp);
     Group seqGroup; seqGroup.title = "SEQUENCER"; seqGroup.bounds = seqBounds_;
     drawGroup(seqGroup);
+    g.setColour(kEdge.brighter(0.25f));
+    for (auto& d : seqDividers_) g.fillRect(d);
 }
 
 void WT8Editor::resized()
@@ -1396,7 +1432,7 @@ void WT8Editor::resized()
         }
     }
 
-    for (auto* l : {&syncLabel_, &divLabel_, &laneLabel_, &dirLabel_, &scaleLabel_, &rootLabel_, &octLabel_, &patLabel_})
+    for (auto* l : {&syncLabel_, &divLabel_, &laneLabel_, &dirLabel_, &scaleLabel_, &rootLabel_, &octLabel_, &patLabel_, &rowEditLabel_, &rowPlayLabel_})
         l->getProperties().set("fontHeight", 11.0f * scale);
 
     // header: preset bar in the empty space between the name and "particledots"
@@ -1410,47 +1446,44 @@ void WT8Editor::resized()
     }
     xposeReadout_.getProperties().set("fontHeight", 13.0f * scale);
 
-    // row A: pattern editing, transport, timing
-    auto controls = inner.removeFromTop(int(30 * scale));
+    // v0.15 layout: six rows, one job per row, every row's controls start at the same x after a 66 px caption.
+    seqDividers_.clear();
+    juce::Rectangle<int> controls;
+    auto nextRow = [&] { controls = inner.removeFromTop(int(30 * scale)); inner.removeFromTop(int(6 * scale)); };
     auto put = [&](juce::Component& c, int w) { c.setBounds(controls.removeFromLeft(int(w * scale))); controls.removeFromLeft(int(6 * scale)); };
-    put(recBtn_, 46); put(restBtn_, 46); put(delBtn_, 42); put(clearBtn_, 50); put(randomBtn_, 58); // (v0.14: RANDOM; the gaps and labels are a little tighter to make room)
-    controls.removeFromLeft(int(6 * scale));
-    put(playBtn_, 52); put(muteBtn_, 52);
-    controls.removeFromLeft(int(6 * scale));
-    put(syncLabel_, 34); put(syncBox_, 62); put(divLabel_, 34); put(divBox_, 58);
+    // a thin line between two control groups; w = total width taken (the line sits in the middle of it)
+    auto div = [&](int w) { seqDividers_.push_back({controls.getX() + int(w * scale) / 2, controls.getY() + int(4 * scale), 1, int(22 * scale)}); controls.removeFromLeft(int(w * scale)); };
 
-    // row B: how the pattern is played back (direction) and which scale its notes are snapped to
-    inner.removeFromTop(int(6 * scale));
-    controls = inner.removeFromTop(int(30 * scale));
-    put(dirLabel_, 66); put(dirBox_, 92); put(pendBtn_, 62);
-    controls.removeFromLeft(int(14 * scale));
-    put(scaleLabel_, 40); put(scaleBox_, 170); put(rootLabel_, 34); put(rootBox_, 52);
+    nextRow(); // EDIT: pattern editing, RANDOM on its own
+    put(rowEditLabel_, 66);
+    put(recBtn_, 46); put(restBtn_, 46); put(delBtn_, 42); put(clearBtn_, 50); div(8); put(randomBtn_, 58);
 
-    // row C: transpose from MIDI in (v0.5), octave-jump size (v0.6)
-    inner.removeFromTop(int(6 * scale));
-    controls = inner.removeFromTop(int(30 * scale));
-    put(xposeBtn_, 82); put(xposeReadout_, 52); put(xposeResetBtn_, 52);
-    controls.removeFromLeft(int(14 * scale));
+    nextRow(); // PLAY: transport, restart, timing, and when a slot switch happens
+    put(rowPlayLabel_, 66);
+    put(playBtn_, 52); put(muteBtn_, 52); put(retrigBtn_, 56); div(8);
+    put(syncLabel_, 34); put(syncBox_, 78); put(divLabel_, 34); put(divBox_, 72); div(8);
+    put(loopEndBtn_, 84);
+
+    nextRow(); // DIRECTION: how the pattern is walked, and the octave jump
+    put(dirLabel_, 66); put(dirBox_, 92); put(pendBtn_, 62); div(8);
     put(octLabel_, 62); put(octBox_, 140);
-    controls.removeFromLeft(int(8 * scale));
-    put(retrigBtn_, 56); put(loopEndBtn_, 84); // v0.13
 
-    // row D: which per-step value the grid shows and edits
-    inner.removeFromTop(int(6 * scale));
-    controls = inner.removeFromTop(int(30 * scale));
-    put(laneLabel_, 30); put(pitchLaneBtn_, 50); put(probLaneBtn_, 46); put(ratchLaneBtn_, 56); put(gateLaneBtn_, 46);
-    put(accentLaneBtn_, 60); put(octLaneBtn_, 40); put(condLaneBtn_, 50);
-    controls.removeFromLeft(int(10 * scale));
-    put(gridViewBtn_, 46); put(ringViewBtn_, 48); put(twoRingsViewBtn_, 64);
+    nextRow(); // SCALE: which scale the notes are snapped to, and the transpose from MIDI in
+    put(scaleLabel_, 66); put(scaleBox_, 170); put(rootLabel_, 34); put(rootBox_, 52); div(8);
+    put(xposeBtn_, 82); put(xposeReadout_, 52); put(xposeResetBtn_, 52);
 
-    // row E (v0.9): the 16 pattern slots, and COPY
-    inner.removeFromTop(int(6 * scale));
+    nextRow(); // LANE: which per-step value the grid shows and edits, and the view (the buttons are a little narrower to fit next to the caption)
+    put(laneLabel_, 66); put(pitchLaneBtn_, 44); put(probLaneBtn_, 40); put(ratchLaneBtn_, 52); put(gateLaneBtn_, 42);
+    put(accentLaneBtn_, 56); put(octLaneBtn_, 36); put(condLaneBtn_, 44); div(8);
+    put(gridViewBtn_, 42); put(ringViewBtn_, 44); put(twoRingsViewBtn_, 60);
+
+    // PATTERN (v0.9): the 16 pattern slots, and COPY
     controls = inner.removeFromTop(int(30 * scale));
+    inner.removeFromTop(int(6 * scale));
     put(patLabel_, 66);
     for (auto& b : slotBtn_) { b.setBounds(controls.removeFromLeft(int(28 * scale))); controls.removeFromLeft(int(2 * scale)); }
     controls.removeFromLeft(int(4 * scale));
     put(copyBtn_, 56);
 
-    inner.removeFromTop(int(6 * scale));
     grid_.setBounds(inner);
 }
