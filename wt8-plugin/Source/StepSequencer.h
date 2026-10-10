@@ -129,6 +129,11 @@ class StepSequencer
     void setOctChance(int index, int percent);      // 0..100
     void setCondition(int index, int a, int b);     // "pass a of every b": b 1..8, a 1..b
     void toggleRest(int index);          // rest <-> note; past the end extends the pattern
+    /** v0.14 RANDOM: replaces the whole pattern with `steps` (1..kMaxSteps) random steps. Each step is a rest with a chance of
+        `restPercent` (0..100), otherwise a note between `lowNote` and `highNote` (inclusive): when `scale` is 0..kNumScales-1 only tones
+        of that scale (on `root`), otherwise any semitone. Velocity 100; every per-step value other than pitch/rest is neutral. The
+        result always holds at least one note. The same `seed` gives the same pattern. Returns the number of notes. */
+    int randomize(int steps, int lowNote, int highNote, int restPercent, int scale, int root, uint64_t seed);
     std::string serialize() const;
     void deserialize(const std::string& text);
     /** v0.8 (pattern slots): after the pattern was swapped, play again from step 1 (Free sync). A note that is sounding is

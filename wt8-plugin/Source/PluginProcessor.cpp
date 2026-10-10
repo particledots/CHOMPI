@@ -1,4 +1,5 @@
 #include "PluginProcessor.h"
+#include <random>
 #include "WT8Engine.h"
 #include "PluginEditor.h"
 #include "StarterPresets.h"
@@ -514,6 +515,18 @@ void WT8AudioProcessor::selectPatternSlot(int slot)
     slotCur_ = slot;
     seq_.deserialize(slots_[slot]); // swaps the steps under the sequencer's own lock; the audio thread just plays the new ones
     seq_.restart();
+}
+
+int WT8AudioProcessor::randomizePattern()
+{
+    const int loop = (int) *apvts.getRawParameterValue("seq_loop");
+    const int steps = loop > 0 ? loop : (seq_.length() > 0 ? seq_.length() : 16);
+    const int scale = (int) *apvts.getRawParameterValue("seq_scale") - 1; // choice 0 = Off -> -1
+    const int root = (int) *apvts.getRawParameterValue("seq_root");
+    std::random_device rd;
+    const uint64_t seed = ((uint64_t) rd() << 32) ^ (uint64_t) rd();
+    seq_.randomize(steps, 60, 84, 25, scale, root, seed);
+    return juce::jlimit(1, StepSequencer::kMaxSteps, steps);
 }
 
 bool WT8AudioProcessor::copyPatternSlot(int from, int to)

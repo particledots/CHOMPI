@@ -534,6 +534,37 @@ void StepSequencer::recordNote(int note, int velocity)
     lastNote_ = s.note;
 }
 
+int StepSequencer::randomize(int steps, int lowNote, int highNote, int restPercent, int scale, int root, uint64_t seed)
+{
+    steps = std::max(1, std::min(kMaxSteps, steps));
+    lowNote = std::max(0, std::min(127, lowNote));
+    highNote = std::max(lowNote, std::min(127, highNote));
+    restPercent = std::max(0, std::min(100, restPercent));
+    std::vector<int> pool; // the notes a step may take
+    for (int n = lowNote; n <= highNote; ++n)
+        if (scale < 0 || scale >= kNumScales || inScale(n, root, scale)) pool.push_back(n);
+    if (pool.empty()) pool.push_back(lowNote);
+    std::mt19937_64 rng(seed);
+    SeqStep fresh[kMaxSteps];
+    int notes = 0;
+    for (int i = 0; i < steps; ++i)
+    {
+        const bool rest = (int) (rng() % 100) < restPercent;
+        const int note = pool[(size_t) (rng() % pool.size())]; // (drawn for rests too, so the notes do not depend on where the rests fall)
+        if (rest) continue; // a default step is a rest
+        SeqStep st;
+        st.note = (uint8_t) note; st.vel = 100; st.rest = false;
+        fresh[i] = st; ++notes;
+    }
+    if (notes == 0) { fresh[0].note = (uint8_t) pool[(size_t) (rng() % pool.size())]; fresh[0].vel = 100; fresh[0].rest = false; notes = 1; }
+    Lock l(lock_);
+    for (int i = 0; i < kMaxSteps; ++i) steps_[i] = i < steps ? fresh[i] : SeqStep();
+    len_ = steps;
+    lastNote_ = steps_[0].rest ? lastNote_ : steps_[0].note;
+    displayIdx_.store(-1, std::memory_order_relaxed);
+    return notes;
+}
+
 void StepSequencer::restart()
 {
     Lock l(lock_);

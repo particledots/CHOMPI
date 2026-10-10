@@ -198,7 +198,7 @@ class WT8Editor : public juce::AudioProcessorEditor, private juce::Timer
 
     // sequencer strip
     StepGrid grid_;
-    juce::TextButton recBtn_{"REC"}, restBtn_{"REST"}, delBtn_{"DEL"}, clearBtn_{"CLEAR"}, playBtn_{"PLAY"}, muteBtn_{"MUTE"};
+    juce::TextButton recBtn_{"REC"}, restBtn_{"REST"}, delBtn_{"DEL"}, clearBtn_{"CLEAR"}, randomBtn_{"RANDOM"}, playBtn_{"PLAY"}, muteBtn_{"MUTE"};
     juce::TextButton pitchLaneBtn_{"PITCH"}, probLaneBtn_{"PROB"}, ratchLaneBtn_{"RATCH"}, gateLaneBtn_{"GATE"},
                      accentLaneBtn_{"ACCENT"}, octLaneBtn_{"OCT"}, condLaneBtn_{"COND"}, pendBtn_{"ENDS x2"};
     juce::TextButton gridViewBtn_{"GRID"}, ringViewBtn_{"RING"}, twoRingsViewBtn_{"2 RINGS"}; // v0.7: which view the steps are shown in (editor state only, not saved)

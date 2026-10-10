@@ -1118,6 +1118,89 @@ int main()
         }
     }
 
+    // ---- T32 (v0.14): RANDOM fills the pattern with random notes and rests ----
+    {
+        printf("T32 random pattern (v0.14): length, range, scale tones, rest chance, repeatability, the rest of the step stays neutral\n");
+        const double sr = 48000, bpm = 120;
+        StepSequencer s;
+        // length / range / chromatic
+        int notes = s.randomize(12, 60, 84, 25, -1, 0, 1234);
+        { SeqStep st[StepSequencer::kMaxSteps]; int len, pi; s.snapshot(st, len, pi);
+          CHECK(len == 12, "the pattern has the asked length (%d)", len);
+          int n = 0; bool inRange = true, neutral = true;
+          for (int i = 0; i < len; ++i) if (!st[i].rest) { ++n; if (st[i].note < 60 || st[i].note > 84) inRange = false;
+              if (st[i].prob != 100 || st[i].ratchet != 1 || st[i].gate != 0 || st[i].accent || st[i].octChance != 0 || st[i].condB != 1 || st[i].vel != 100) neutral = false; }
+          CHECK(n == notes && n >= 1, "the returned note count matches (%d / %d)", n, notes);
+          CHECK(inRange, "every note lies in C3..C5 (60..84)");
+          CHECK(neutral, "probability, ratchet, gate, accent, octave and condition are left neutral, velocity 100"); }
+        // steps past the new length are empty, an older longer pattern is replaced
+        fill(s, {60,62,64,65,67,69,71,72,74,76,77,79,81,83,84,86,88,89,91,93});
+        s.randomize(6, 60, 84, 25, -1, 0, 5);
+        { SeqStep st[StepSequencer::kMaxSteps]; int len, pi; s.snapshot(st, len, pi);
+          CHECK(len == 6, "a longer pattern is replaced by the shorter random one (len %d)", len);
+          bool clean = true; for (int i = 6; i < StepSequencer::kMaxSteps; ++i) if (!st[i].rest) clean = false;
+          CHECK(clean, "nothing is left of the old steps beyond the new length"); }
+        // lengths are clamped
+        s.randomize(0, 60, 84, 25, -1, 0, 1); CHECK(s.length() == 1, "0 steps asks for 1");
+        s.randomize(99, 60, 84, 25, -1, 0, 1); CHECK(s.length() == StepSequencer::kMaxSteps, "99 steps is clamped to 32");
+        // scale tones only (every scale, several roots, many seeds)
+        bool allInScale = true; int checked = 0;
+        for (int scale = 0; scale < StepSequencer::kNumScales; ++scale)
+            for (int root : {0, 3, 7, 11})
+                for (uint64_t seed = 1; seed <= 6; ++seed)
+                {
+                    s.randomize(32, 60, 84, 25, scale, root, seed * 7919 + (uint64_t) scale);
+                    SeqStep st[StepSequencer::kMaxSteps]; int len, pi; s.snapshot(st, len, pi);
+                    for (int i = 0; i < len; ++i) if (!st[i].rest) { ++checked; if (!StepSequencer::inScale(st[i].note, root, scale) || st[i].note < 60 || st[i].note > 84) allInScale = false; }
+                }
+        CHECK(allInScale && checked > 1000, "with a scale set every note is a tone of it and inside the range (%d notes checked)", checked);
+        // the notes spread over the whole range and the scale is not collapsed onto a few tones
+        { std::vector<int> seen(128, 0); for (uint64_t seed = 1; seed <= 200; ++seed) { s.randomize(32, 60, 84, 0, -1, 0, seed); SeqStep st[32]; int len, pi; s.snapshot(st, len, pi); for (int i = 0; i < len; ++i) seen[st[i].note]++; }
+          int distinct = 0; for (int n = 60; n <= 84; ++n) if (seen[n] > 0) ++distinct;
+          CHECK(distinct == 25, "chromatic: all 25 notes of the range come up (%d)", distinct); }
+        { std::vector<int> seen(128, 0); for (uint64_t seed = 1; seed <= 200; ++seed) { s.randomize(32, 60, 84, 0, 0 /* first scale */, 0, seed); SeqStep st[32]; int len, pi; s.snapshot(st, len, pi); for (int i = 0; i < len; ++i) seen[st[i].note]++; }
+          int distinct = 0; for (int n = 60; n <= 84; ++n) if (seen[n] > 0) ++distinct; int expect = 0; for (int n = 60; n <= 84; ++n) if (StepSequencer::inScale(n, 0, 0)) ++expect;
+          CHECK(distinct == expect, "with a scale every tone of the range comes up (%d of %d)", distinct, expect); }
+        // rest chance: a per-step chance, so the count varies but averages near the percentage; 0 = no rests, 100 = one note (the guaranteed one)
+        { long long rests = 0, total = 0; std::vector<int> positions(32, 0); int differentCounts = 0, prevRests = -1;
+          for (uint64_t seed = 1; seed <= 400; ++seed) { s.randomize(32, 60, 84, 25, -1, 0, seed); SeqStep st[32]; int len, pi; s.snapshot(st, len, pi); int r = 0; for (int i = 0; i < len; ++i) if (st[i].rest) { ++r; positions[i]++; } rests += r; total += len; if (r != prevRests) ++differentCounts; prevRests = r; }
+          const double frac = (double) rests / (double) total;
+          CHECK(frac > 0.22 && frac < 0.28, "about 25 %% of the steps are rests (%.3f)", frac);
+          CHECK(differentCounts > 50, "the number of rests differs from press to press (%d changes in 400)", differentCounts);
+          int minPos = 1 << 30, maxPos = 0; for (int p : positions) { minPos = std::min(minPos, p); maxPos = std::max(maxPos, p); }
+          CHECK(minPos > 40 && maxPos < 160, "rests fall on every step position, not on a fixed pattern (%d..%d of 400)", minPos, maxPos); }
+        s.randomize(16, 60, 84, 0, -1, 0, 9);  { SeqStep st[32]; int len, pi; s.snapshot(st, len, pi); bool none = true; for (int i = 0; i < len; ++i) if (st[i].rest) none = false; CHECK(none, "0 %% rests: every step is a note"); }
+        notes = s.randomize(16, 60, 84, 100, -1, 0, 9); CHECK(notes == 1, "100 %% rests still leaves one note (%d)", notes);
+        { SeqStep st[32]; int len, pi; s.snapshot(st, len, pi); int n = 0; for (int i = 0; i < len; ++i) if (!st[i].rest) ++n; CHECK(n == 1, "...and the pattern holds exactly that one note"); }
+        // repeatability
+        s.randomize(16, 60, 84, 25, 2, 5, 777); const std::string a = s.serialize();
+        s.randomize(16, 60, 84, 25, 2, 5, 777); CHECK(s.serialize() == a, "the same seed gives the same pattern");
+        s.randomize(16, 60, 84, 25, 2, 5, 778); CHECK(s.serialize() != a, "another seed gives another pattern");
+        // the notes do not depend on where the rests fall (same seed, different rest chance, same note at every step that is a note in both)
+        { StepSequencer x, y; x.randomize(32, 60, 84, 10, -1, 0, 42); y.randomize(32, 60, 84, 60, -1, 0, 42); SeqStep sx[32], sy[32]; int lx, ly, p; x.snapshot(sx, lx, p); y.snapshot(sy, ly, p);
+          bool same = true; for (int i = 0; i < 32; ++i) if (!sx[i].rest && !sy[i].rest && sx[i].note != sy[i].note) same = false; CHECK(same, "the note drawn for a step does not depend on the rest chance"); }
+        // saving: the random pattern survives serialize / deserialize unchanged
+        { StepSequencer x; x.randomize(20, 48, 72, 30, 5, 2, 31337); StepSequencer y; y.deserialize(x.serialize()); CHECK(y.serialize() == x.serialize() && y.length() == 20, "a random pattern saves and loads unchanged"); }
+        // it plays: on / off alternate, a note is heard, nothing stays on after a stop, and replacing the pattern while it sounds leaves nothing stuck
+        { StepSequencer x; SeqSettings st; st.play = true; st.division = 2; st.gate = 0.5f; st.scale = 0; st.root = 0;
+          x.randomize(8, 60, 84, 25, 0, 0, 99);
+          auto e = run(x, st, bpm, sr, 512, 96000, false);
+          int bal = 0; bool okAlt = !e.empty(), inScaleOk = true; for (auto& v : e) { bal += v.on ? 1 : -1; if (bal < 0 || bal > 1) okAlt = false; if (v.on && !StepSequencer::inScale(v.note, 0, 0)) inScaleOk = false; }
+          CHECK(okAlt, "a random pattern plays: notes alternate on / off");
+          CHECK(inScaleOk, "...and every sounding note is in the scale");
+          // replace while playing, several times, then stop
+          int total = bal;
+          for (int rep = 0; rep < 20; ++rep)
+          {
+              x.randomize(1 + rep % 12, 60, 84, 25, -1, 0, 1000 + rep);
+              auto e2 = run(x, st, bpm, sr, 256, 3000 + 700 * rep, false);
+              for (auto& v : e2) { total += v.on ? 1 : -1; CHECK(total >= 0 && total <= 1, "replacing the pattern while it plays: notes still alternate (balance %d)", total); if (total < 0 || total > 1) break; }
+          }
+          SeqSettings off = st; off.play = false; SeqEvent buf[16]; SeqHostInfo h; h.bpm = bpm;
+          const int nEv = x.process(sr, 512, h, off, buf, 16); for (int i = 0; i < nEv; ++i) total += buf[i].on ? 1 : -1;
+          CHECK(total == 0, "nothing is left sounding after a stop (%d)", total); }
+    }
+
     printf(failures ? "FAIL (%d)\n" : "PASS\n", failures);
     return failures ? 1 : 0;
 }

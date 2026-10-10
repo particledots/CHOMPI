@@ -747,6 +747,18 @@ WT8Editor::WT8Editor(WT8AudioProcessor& p) : juce::AudioProcessorEditor(&p), pro
     restBtn_.onClick = [this] { proc_.sequencer().addRest(); grid_.refresh(); };
     delBtn_.onClick = [this] { proc_.sequencer().deleteLast(); grid_.refresh(); };
     clearBtn_.onClick = [this] { proc_.sequencer().clear(); grid_.refresh(); };
+    // v0.14: fill the pattern with random notes and rests (asks first when the pattern already holds something)
+    addAndMakeVisible(randomBtn_);
+    randomBtn_.onClick = [this] {
+        auto doIt = [this] { proc_.randomizePattern(); grid_.refresh(); refreshSlotButtons(); };
+        if (proc_.sequencer().length() == 0) { doIt(); return; }
+        juce::Component::SafePointer<WT8Editor> self(this);
+        juce::AlertWindow::showAsync(juce::MessageBoxOptions::makeOptionsOkCancel(
+                                         juce::MessageBoxIconType::NoIcon, "REPLACE PATTERN?",
+                                         "Pattern " + juce::String(proc_.getPatternSlot() + 1) + " will be replaced with random notes and rests.",
+                                         "REPLACE", "CANCEL", this),
+                                     juce::ModalCallbackFunction::create([self, doIt](int r) { if (self != nullptr && r == 1) doIt(); }));
+    };
     playBtn_.setClickingTogglesState(true);
     muteBtn_.setClickingTogglesState(true);
     playAtt_ = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(proc_.apvts, "seq_play", playBtn_);
@@ -1401,11 +1413,11 @@ void WT8Editor::resized()
     // row A: pattern editing, transport, timing
     auto controls = inner.removeFromTop(int(30 * scale));
     auto put = [&](juce::Component& c, int w) { c.setBounds(controls.removeFromLeft(int(w * scale))); controls.removeFromLeft(int(6 * scale)); };
-    put(recBtn_, 48); put(restBtn_, 48); put(delBtn_, 42); put(clearBtn_, 52);
-    controls.removeFromLeft(int(10 * scale));
+    put(recBtn_, 46); put(restBtn_, 46); put(delBtn_, 42); put(clearBtn_, 50); put(randomBtn_, 58); // (v0.14: RANDOM; the gaps and labels are a little tighter to make room)
+    controls.removeFromLeft(int(6 * scale));
     put(playBtn_, 52); put(muteBtn_, 52);
-    controls.removeFromLeft(int(10 * scale));
-    put(syncLabel_, 34); put(syncBox_, 66); put(divLabel_, 34); put(divBox_, 62);
+    controls.removeFromLeft(int(6 * scale));
+    put(syncLabel_, 34); put(syncBox_, 62); put(divLabel_, 34); put(divBox_, 58);
 
     // row B: how the pattern is played back (direction) and which scale its notes are snapped to
     inner.removeFromTop(int(6 * scale));

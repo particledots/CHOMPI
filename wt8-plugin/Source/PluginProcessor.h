@@ -74,6 +74,10 @@ class WT8AudioProcessor : public juce::AudioProcessor
         playing slot while one is queued cancels the queue. */
     void requestPatternSlot(int slot);
     int  getQueuedPatternSlot() const { return seq_.queuedSlot(); } // -1 = none
+    /** v0.14 RANDOM: replaces the current pattern with random notes and rests (see StepSequencer::randomize). Length = the LOOP knob
+        (ALL: the pattern's length, or 16 when it is empty); notes from C3 up two octaves, only scale tones when SCALE is set; each
+        step is a rest with a 25 % chance. Message thread. Returns the number of steps made. */
+    int randomizePattern();
     /** "STEP 1": see StepSequencer::requestStep1(). */
     void requestStep1() { seq_.requestStep1(); }
 

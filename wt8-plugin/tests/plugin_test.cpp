@@ -1351,7 +1351,73 @@ int main()
         printf("v0.13 loop-end slot switching + STEP 1: %s\n", v13Ok ? "ok" : "FAILED");
     }
 
-    bool ok = seqOk && v4Ok && v5Ok && v6Ok && v8Ok && v9Ok && v10Ok && v13Ok && finite && peak > 0.02f && peak <= 1.5f && held > 0.005f && tail < held * 0.05f && std::fabs(cutoff - 0.2f) < 0.01f;
+    // ---- v0.14: RANDOM (randomizePattern through the real processor) ----
+    bool v14Ok = true;
+    {
+        auto setPlain = [](WT8AudioProcessor& pr, const char* id, float plain) {
+            auto* p = dynamic_cast<juce::RangedAudioParameter*>(pr.apvts.getParameter(id));
+            p->setValueNotifyingHost(p->convertTo0to1(plain));
+        };
+        auto check = [&](bool cond, const char* what) { printf("  %s: %s\n", cond ? "ok  " : "FAIL", what); v14Ok = v14Ok && cond; };
+        auto makeProc = [&]() { auto pr = std::make_unique<WT8AudioProcessor>(); pr->setPlayConfigDetails(0, 2, sr, bs); pr->prepareToPlay(sr, bs); return pr; };
+        auto snap = [](WT8AudioProcessor& pr, std::vector<SeqStep>& out) { out.assign(StepSequencer::kMaxSteps, SeqStep()); int len = 0, pi = 0; pr.sequencer().snapshot(out.data(), len, pi); return len; };
+        std::vector<SeqStep> st;
+        {   // empty slot, LOOP = ALL: 16 steps
+            auto p = makeProc();
+            const int made = p->randomizePattern(); const int len = snap(*p, st);
+            check(made == 16 && len == 16, "an empty slot with LOOP = ALL gets 16 steps");
+        }
+        {   // LOOP = 7: 7 steps; a longer pattern is replaced
+            auto p = makeProc(); for (int i = 0; i < 20; ++i) p->sequencer().recordNote(60 + i, 100);
+            setPlain(*p, "seq_loop", 7.f);
+            p->randomizePattern(); const int len = snap(*p, st);
+            check(len == 7, "LOOP = 7 gives 7 steps, replacing the old 20-step pattern");
+        }
+        {   // LOOP = ALL with a pattern: its own length
+            auto p = makeProc(); for (int i = 0; i < 11; ++i) p->sequencer().recordNote(60 + i, 100);
+            p->randomizePattern(); const int len = snap(*p, st);
+            check(len == 11, "LOOP = ALL keeps the pattern's length (11)");
+        }
+        {   // scale: every note is a scale tone (Major, root D = 2) and in C3..C5
+            auto p = makeProc(); setPlain(*p, "seq_loop", 32.f); setPlain(*p, "seq_scale", 1.f); setPlain(*p, "seq_root", 2.f);
+            bool ok2 = true; int notes = 0;
+            for (int rep = 0; rep < 50; ++rep) { p->randomizePattern(); const int len = snap(*p, st); for (int i = 0; i < len; ++i) if (!st[i].rest) { ++notes; if (!StepSequencer::inScale(st[i].note, 2, 0) || st[i].note < 60 || st[i].note > 84) ok2 = false; } }
+            check(ok2 && notes > 500, "with SCALE set, every random note is a tone of it, in C3..C5");
+        }
+        {   // two presses give different patterns; the other slots and the slot number do not change
+            auto p = makeProc(); for (int n : {50, 52, 54}) p->sequencer().recordNote(n, 100);
+            p->selectPatternSlot(4); for (int n : {40, 41}) p->sequencer().recordNote(n, 100);
+            p->selectPatternSlot(0); setPlain(*p, "seq_loop", 16.f);
+            p->randomizePattern(); const std::string a = p->sequencer().serialize();
+            p->randomizePattern(); const std::string b = p->sequencer().serialize();
+            check(a != b, "two presses give two different patterns");
+            check(p->getPatternSlot() == 0, "the current slot does not change");
+            p->selectPatternSlot(4);
+            check(p->sequencer().serialize() == [&] { StepSequencer t; for (int n : {40, 41}) t.recordNote(n, 100); return t.serialize(); }(), "another slot is untouched");
+            p->selectPatternSlot(0);
+            check(p->sequencer().serialize() == b, "the random pattern is kept in its slot when the slot is left and entered again");
+        }
+        {   // saved with the project and loaded again
+            auto p = makeProc(); setPlain(*p, "seq_loop", 12.f); p->randomizePattern();
+            const std::string want = p->sequencer().serialize();
+            juce::MemoryBlock mb; p->getStateInformation(mb);
+            auto q = makeProc(); q->setStateInformation(mb.getData(), (int) mb.getSize());
+            check(q->sequencer().serialize() == want, "a random pattern saves with the project and comes back unchanged");
+        }
+        {   // it sounds, finite, and pressing RANDOM while it plays leaves nothing droning after PLAY off
+            auto p = makeProc(); setPlain(*p, "seq_loop", 8.f); p->randomizePattern();
+            juce::AudioBuffer<float> b(2, bs); juce::MidiBuffer none; bool fin = true; float pk = 0, tailPk = 0;
+            p->apvts.getParameter("seq_play")->setValueNotifyingHost(1.f);
+            for (int blk = 0; blk < 200; ++blk) { b.clear(); p->processBlock(b, none); for (int i = 0; i < bs; ++i) { const float v = b.getSample(0, i); if (!std::isfinite(v)) fin = false; pk = std::fmax(pk, std::fabs(v)); } if (blk % 17 == 5) p->randomizePattern(); }
+            p->apvts.getParameter("seq_play")->setValueNotifyingHost(0.f);
+            for (int blk = 0; blk < 1500; ++blk) { b.clear(); p->processBlock(b, none); if (blk >= 1400) for (int i = 0; i < bs; ++i) tailPk = std::fmax(tailPk, std::fabs(b.getSample(0, i))); }
+            check(fin && pk > 0.01f, "a random pattern sounds, and re-randomizing while it plays stays finite");
+            check(tailPk < 0.001f, "after PLAY off nothing keeps droning");
+        }
+        printf("v0.14 RANDOM: %s\n", v14Ok ? "ok" : "FAILED");
+    }
+
+    bool ok = seqOk && v4Ok && v5Ok && v6Ok && v8Ok && v9Ok && v10Ok && v13Ok && v14Ok && finite && peak > 0.02f && peak <= 1.5f && held > 0.005f && tail < held * 0.05f && std::fabs(cutoff - 0.2f) < 0.01f;
     printf(ok ? "PASS\n" : "FAIL\n");
     return ok ? 0 : 1;
 }
