@@ -147,6 +147,38 @@ int main()
         check(q->sequencer().serialize() == p->sequencer().serialize(), "a state with a sound parameter in it (as the first draft saved) still loads, pattern intact");
     }
 
+    // GATE dragged back and forth while the pattern plays (what Bryn did when Logic's synth crackled once): the output stays balanced and bounded
+    {
+        auto p = makeProc();
+        for (int n : {60, 64, 67, 72, 55, 59}) p->sequencer().recordNote(n, 100);
+        p->sequencer().setRatchet(1, 3); p->sequencer().setRatchet(4, 4);
+        setPlain(*p, "seq_div", 3.f); // a short step
+        p->apvts.getParameter("seq_play")->setValueNotifyingHost(1.f);
+        std::vector<Ev> ev; long blk = 0; juce::AudioBuffer<float> b; b.setSize(0, bs);
+        for (; blk < 3000; ++blk)
+        {
+            const float ph = (float) std::fmod(blk * 0.013, 2.0); setPlain(*p, "seq_gate", 0.05f + 0.95f * (ph < 1 ? ph : 2 - ph)); // sweep 5..100 %
+            juce::MidiBuffer m; p->processBlock(b, m);
+            for (const auto meta : m) { const auto msg = meta.getMessage(); if (msg.isNoteOnOrOff()) ev.push_back({blk * bs + meta.samplePosition, msg.isNoteOn(), msg.getNoteNumber(), 0, 1}); }
+        }
+        setPlain(*p, "seq_play", 0.f);
+        { juce::MidiBuffer m; p->processBlock(b, m); for (const auto meta : m) { const auto msg = meta.getMessage(); if (msg.isNoteOnOrOff()) ev.push_back({blk * bs + meta.samplePosition, msg.isNoteOn(), msg.getNoteNumber(), 0, 1}); } }
+        std::map<int, int> sounding; bool overlap = false, orphanOff = false; int maxPerBlock = 0; std::map<long, int> perBlock;
+        for (auto& e : ev)
+        {
+            perBlock[e.t / bs]++;
+            if (e.on) { if (sounding[e.note]++ > 0) overlap = true; }
+            else { if (sounding[e.note] == 0) orphanOff = true; else sounding[e.note]--; }
+        }
+        for (auto& kv : perBlock) maxPerBlock = std::max(maxPerBlock, kv.second);
+        int left = 0; for (auto& kv : sounding) left += kv.second;
+        printf("  (%d events, at most %d in one block)\n", (int) ev.size(), maxPerBlock);
+        check(!overlap, "GATE sweep: a note is never started again while it is still on (no doubled note-on)");
+        check(!orphanOff, "GATE sweep: no note-off without a note-on");
+        check(left == 0, "GATE sweep: nothing left sounding after PLAY off");
+        check(maxPerBlock < 40, "GATE sweep: no burst of events in one block");
+    }
+
     // saved with the project
     {
         auto p = makeProc();
