@@ -5,15 +5,18 @@ from the open-source CHOMPI release (https://github.com/CHOMPI-Club/CHOMPI, MIT)
 Not affiliated with or endorsed by Chase Bliss / CHOMPI Club. "CHOMPI" is their trademark; this project
 uses a different name on purpose.
 
-**Status: v0.1, first working skeleton.** The engine, parameters, MIDI, state save/restore and wavetable
-loading are verified by headless tests on Linux (see Tests). It has **not yet been built on macOS or loaded
-in Logic** — that is the next step.
+**Status: v0.14 (commit 940b333).** The engine, parameters, MIDI, state save/restore, wavetable loading and the step
+sequencer are covered by headless tests that run on Linux and again on the macOS build server (see Tests). The
+Audio Unit is built there as a universal binary (Apple silicon and Intel) and has been tried in Logic Pro by its
+owner on an Intel Mac (macOS 12.7.6) and an M4 Mac mini. The **VST3 and Standalone builds have not been tried in
+a host.** Each section below says which version added a feature.
 
 ## What's in it
 - 8 voices: wavetable oscillator (7 tables x 33 frames) -> resonant filter -> amp envelope
 - 2 LFOs (pitch, filter), delay <-> reverb macro, compressor <-> saturation macro, pan, gain
-- Custom panel (v0.2): knobs grouped by signal flow (oscillator, envelope, filter, LFO, effects, output), value readouts, double-click a knob to reset it, double-click a readout to type a value, resizable window. All controls are automatable in Logic. No wavetable display yet.
-- Not yet: presets (beyond Logic's own plugin presets), user wavetables, a wavetable display. (MIDI clock is not needed: the sequencer follows Logic's tempo.)
+- Custom panel (v0.2): knobs grouped by signal flow (oscillator, envelope, filter, LFO, effects, output), value readouts, double-click a knob to reset it, double-click a readout to type a value, resizable window. All controls are automatable in Logic.
+- Since v0.8 / v0.9: presets (a built-in INIT, 14 starter presets, your own saved presets) and 16 pattern slots. Since v0.10 / v0.11: loading your own wavetables. Since v0.12: a picture of the selected table (all described in the sections below).
+- Not there yet (ideas only, nothing built): more than 7 table slots, a choice of LFO shape (both LFOs are triangle), other filter modes or a filter envelope, a tempo-synced delay time, an automatable pattern-slot parameter. (MIDI clock is not needed: the sequencer follows Logic's tempo.)
 
 ## Build on your Mac (Apple silicon or Intel)
 One-time setup:
