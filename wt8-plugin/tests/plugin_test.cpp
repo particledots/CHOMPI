@@ -1697,7 +1697,35 @@ int main()
         printf("v0.17 LFO shapes: %s\n", v17Ok ? "ok" : "FAILED");
     }
 
-    bool ok = seqOk && v4Ok && v5Ok && v6Ok && v8Ok && v9Ok && v10Ok && v13Ok && v14Ok && v16Ok && v17Ok && finite && peak > 0.02f && peak <= 1.5f && held > 0.005f && tail < held * 0.05f && std::fabs(cutoff - 0.2f) < 0.01f;
+    // ---- v0.18: the step view (GRID / RING / 2 RINGS) is saved with the project ----
+    bool v18Ok = true;
+    {
+        auto check = [&](bool cond, const char* what) { printf("  %s: %s\n", cond ? "ok  " : "FAIL", what); v18Ok = v18Ok && cond; };
+        auto makeProc = [&]() { auto pr = std::make_unique<WT8AudioProcessor>(); pr->setPlayConfigDetails(0, 2, sr, bs); pr->prepareToPlay(sr, bs); return pr; };
+        { auto pr = makeProc(); check(pr->getUiView() == 2, "a new instance starts in 2 RINGS"); }
+        for (int v = 0; v <= 2; ++v)
+        {
+            auto src = makeProc(); src->setUiView(v);
+            juce::MemoryBlock saved; src->getStateInformation(saved);
+            auto dst = makeProc(); dst->setUiView(v == 2 ? 0 : 2); // start somewhere else
+            dst->setStateInformation(saved.getData(), (int) saved.getSize());
+            check(dst->getUiView() == v, (std::string("the view ") + std::to_string(v) + " (0 GRID, 1 RING, 2 2 RINGS) comes back after save and reopen").c_str());
+        }
+        {
+            auto src = makeProc(); src->setUiView(0);
+            juce::MemoryBlock saved; src->getStateInformation(saved);
+            auto xml = juce::AudioProcessor::getXmlFromBinary(saved.getData(), (int) saved.getSize());
+            xml->removeAttribute("uiView");
+            juce::MemoryBlock oldState; juce::AudioProcessor::copyXmlToBinary(*xml, oldState);
+            auto target = makeProc(); target->setUiView(1);
+            target->setStateInformation(oldState.getData(), (int) oldState.getSize());
+            check(target->getUiView() == 2, "a project saved before v0.18 (no saved view) opens in 2 RINGS");
+        }
+        { auto pr = makeProc(); pr->setUiView(7); check(pr->getUiView() == 2, "an out-of-range view is limited"); pr->setUiView(-3); check(pr->getUiView() == 0, "...at both ends"); }
+        printf("v0.18 step view: %s\n", v18Ok ? "ok" : "FAILED");
+    }
+
+    bool ok = seqOk && v4Ok && v5Ok && v6Ok && v8Ok && v9Ok && v10Ok && v13Ok && v14Ok && v16Ok && v17Ok && v18Ok && finite && peak > 0.02f && peak <= 1.5f && held > 0.005f && tail < held * 0.05f && std::fabs(cutoff - 0.2f) < 0.01f;
     printf(ok ? "PASS\n" : "FAIL\n");
     return ok ? 0 : 1;
 }

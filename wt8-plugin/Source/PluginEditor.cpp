@@ -840,10 +840,12 @@ WT8Editor::WT8Editor(WT8AudioProcessor& p) : juce::AudioProcessorEditor(&p), pro
         b->setRadioGroupId(1002);
         addAndMakeVisible(*b);
     }
-    gridViewBtn_.onClick = [this] { if (gridViewBtn_.getToggleState()) grid_.setView(StepGrid::View::Grid); };
-    ringViewBtn_.onClick = [this] { if (ringViewBtn_.getToggleState()) grid_.setView(StepGrid::View::Ring); };
-    twoRingsViewBtn_.onClick = [this] { if (twoRingsViewBtn_.getToggleState()) grid_.setView(StepGrid::View::TwoRings); };
-    gridViewBtn_.setToggleState(true, juce::dontSendNotification);
+    // v0.18: the view is kept in the processor (saved with the project); a click tells it, the editor opens in the saved view
+    gridViewBtn_.onClick = [this] { if (gridViewBtn_.getToggleState()) { grid_.setView(StepGrid::View::Grid); proc_.setUiView(0); } };
+    ringViewBtn_.onClick = [this] { if (ringViewBtn_.getToggleState()) { grid_.setView(StepGrid::View::Ring); proc_.setUiView(1); } };
+    twoRingsViewBtn_.onClick = [this] { if (twoRingsViewBtn_.getToggleState()) { grid_.setView(StepGrid::View::TwoRings); proc_.setUiView(2); } };
+    shownView_ = -1;
+    syncViewFromProcessor();
 
     pendBtn_.setClickingTogglesState(true);
     addAndMakeVisible(pendBtn_);
@@ -974,8 +976,18 @@ WT8Editor::WT8Editor(WT8AudioProcessor& p) : juce::AudioProcessorEditor(&p), pro
     startTimerHz(15);
 }
 
+void WT8Editor::syncViewFromProcessor()
+{
+    const int v = proc_.getUiView();
+    if (v == shownView_) return;
+    shownView_ = v;
+    (v == 0 ? gridViewBtn_ : v == 1 ? ringViewBtn_ : twoRingsViewBtn_).setToggleState(true, juce::dontSendNotification);
+    grid_.setView(v == 0 ? StepGrid::View::Grid : v == 1 ? StepGrid::View::Ring : StepGrid::View::TwoRings);
+}
+
 void WT8Editor::timerCallback()
 {
+    syncViewFromProcessor(); // a project was opened while the editor is showing
     grid_.refresh();
     refreshTableControls();
     recBtn_.setToggleState(proc_.isSeqRecording(), juce::dontSendNotification);

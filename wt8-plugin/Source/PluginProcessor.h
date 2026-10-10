@@ -78,6 +78,10 @@ class WT8AudioProcessor : public juce::AudioProcessor
     // and the sequencer then moves on to the next slot that holds a pattern, wrapping round. Both the switch and the per-slot counts
     // (1..16, default 1) are saved with the project (an older project has CHAIN off and every count 1); neither is automatable.
     // The processor keeps the sequencer's copy of all slots (its "bank") up to date; see ChainHold.
+    // ---- v0.18 step view: 0 = GRID, 1 = RING, 2 = 2 RINGS. Chosen in the editor, saved with the project, restored when the editor opens.
+    // New instances and projects from before v0.18 (no saved value) use 2 RINGS. Not a parameter, not automatable.
+    int  getUiView() const { return uiView_.load(); }
+    void setUiView(int v) { uiView_.store(juce::jlimit(0, 2, v)); }
     bool getChain() const { return seq_.chainOn(); }
     void setChain(bool on) { seq_.setChain(on); }
     int  getSlotRepeats(int slot) const { return seq_.chainRepeat(slot); }
@@ -159,6 +163,7 @@ class WT8AudioProcessor : public juce::AudioProcessor
     mutable std::string slots_[kPatternSlots];          // saved text of each slot; slots_[slotCur_] is stale, seq_ holds it
     mutable int slotCur_ = 0;                           // (mutable: a const getter first collects a loop-end switch the audio thread has made)
     std::atomic<bool> slotAtLoopEnd_{false};
+    std::atomic<int> uiView_{2}; // v0.18: see getUiView()
     /** (slotLock_ held) Collects a queued pattern the audio thread has swapped in since the last call: the replaced pattern goes into
         its slot's text and the new slot becomes current. `live` (if not null) gets the live pattern's text, `cancelQueue` drops any queue. */
     void syncSlotsLocked(std::string* live, bool cancelQueue) const;

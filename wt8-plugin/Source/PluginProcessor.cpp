@@ -380,6 +380,7 @@ juce::AudioProcessorEditor* WT8AudioProcessor::createEditor()
 void WT8AudioProcessor::getStateInformation(juce::MemoryBlock& destData)
 {
     apvts.state.setProperty("transpose", seqTranspose_.load(), nullptr);
+    apvts.state.setProperty("uiView", uiView_.load(), nullptr); // v0.18: the step view (GRID / RING / 2 RINGS); a project without it opens in 2 RINGS
     apvts.state.setProperty("slotLoopEnd", slotAtLoopEnd_.load() ? 1 : 0, nullptr); // v0.13; a project without it switches at once, as before
     {
         // v0.16 chaining: the switch and the 16 per-slot pass counts; a project without them has CHAIN off and every count 1
@@ -443,6 +444,7 @@ void WT8AudioProcessor::setStateInformation(const void* data, int sizeInBytes)
                 // v0.13: whatever was queued belongs to the old project (cancel first, so no swap can land in the loaded pattern)
                 std::string discardedText; int discardedSlot = 0;
                 seq_.takeSwitch(nullptr, discardedText, discardedSlot, true);
+                uiView_.store(juce::jlimit(0, 2, (int) apvts.state.getProperty("uiView", 2))); // v0.18
                 slotAtLoopEnd_.store((int) apvts.state.getProperty("slotLoopEnd", 0) != 0); // older projects have none: switch at once
                 seq_.deserialize(apvts.state.getProperty("sequence").toString().toStdString());
                 slotCur_ = juce::jlimit(0, kPatternSlots - 1, (int) apvts.state.getProperty("patCur", 0));
