@@ -545,9 +545,8 @@ void StepSequencer::resetTransport()
 {
     Lock l(lock_);
     wasRunning_ = false;
-    held_ = false;
-    gateOffPpq_ = -1.0;
-    ratNext_ = ratTotal_ = 0;
+    // (A note that is sounding stays "held" on purpose: the next process() call releases it, running or not. Forgetting it here, as
+    // v0.12 and earlier did, left the engine's voice without its note-off: loading a project while the sequence sounded gave a drone.)
     kOff_ = 0;
     step1Pending_.store(false, std::memory_order_relaxed);
     displayIdx_.store(-1, std::memory_order_relaxed);
@@ -600,7 +599,7 @@ int StepSequencer::process(double sr, int numSamples, const SeqHostInfo& h, cons
 
     const double bpm = h.bpm > 0.0 ? h.bpm : 120.0;
     const double pps = bpm / 60.0 / sr; // quarter notes per sample
-    if (!wasRunning_) { runKey_ = nextRandom(); kOff_ = 0; step1Pending_.store(false, std::memory_order_relaxed); } // SEED off: every start gets fresh random choices
+    if (!wasRunning_) { releaseHeld(0); runKey_ = nextRandom(); kOff_ = 0; step1Pending_.store(false, std::memory_order_relaxed); } // SEED off: every start gets fresh random choices
     if (s.followHost) step1Pending_.store(false, std::memory_order_relaxed); // STEP 1 is a Free-sync control: in Logic sync the bar decides
     double ppq0;
     if (s.followHost)

@@ -1333,6 +1333,21 @@ int main()
             q->apvts.getParameter("seq_play")->setValueNotifyingHost(1.f); runB(*q, 40);
             check(fin && pk > 0.01f, "STEP 1 while stopped is forgotten: the next PLAY starts normally");
         }
+        // a project loaded while the sequencer holds a note must not leave that note droning (found by Bryn in Logic, Oct 9: reopening a
+        // saved project gave a drone that only PLAY cleared). The state is loaded into a processor whose sequence is sounding.
+        {
+            auto src = setUp(false, true); // saved with PLAY on (so the state says PLAY = on)
+            juce::MemoryBlock mb; src->getStateInformation(mb);
+            for (int variant = 0; variant < 24; ++variant)
+            {
+                auto p = setUp(false, true);
+                if (variant >= 12) setPlain(*p, "seq_sync", 1.f); // loaded while following Logic
+                runB(*p, variant % 12); // somewhere inside a step: a note may be sounding
+                p->setStateInformation(mb.getData(), (int) mb.getSize());
+                runB(*p, 1400); runB(*p, 100); // about 16 s: far longer than any release; only the last stretch is measured
+                check(fin && pk < 0.001f, "loading a project while the sequence sounds leaves no drone (offset varied through a step)");
+            }
+        }
         printf("v0.13 loop-end slot switching + STEP 1: %s\n", v13Ok ? "ok" : "FAILED");
     }
 
