@@ -640,7 +640,10 @@ const juce::StringArray& WT8AudioProcessor::presetParameterIds()
     // The sound: oscillator, envelope, filter, LFOs, effects and the compressor / saturation. Not included on purpose: GAIN,
     // PAN and BOOST (the level into the mixer, which a preset should not change), nor anything of the sequencer.
     static const juce::StringArray ids{"table", "cycle", "octave", "pitch", "attack", "release", "cutoff", "resonance", "fx",
-                                       "fxtime", "pitchlfodepth", "pitchlforate", "filterlfodepth", "filterlforate", "comp"};
+                                       "fxtime", "pitchlfodepth", "pitchlforate", "filterlfodepth", "filterlforate", "comp",
+                                       // added in v0.21 (a preset file without them gets the defaults = the sound before v0.17)
+                                       "pitchlfoshape", "filterlfoshape", "filtertype", "filterkey", "filtervel", "filterenv",
+                                       "filterdecay"};
     return ids;
 }
 

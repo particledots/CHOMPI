@@ -538,6 +538,33 @@ int main()
             setPlain(*p, "cutoff", 0.1f); p->loadPreset(listed);
             check(near(getPlain(*p, "cutoff"), 0.77f), "...and the new value is what loads");
 
+            // v0.21: the LFO shapes and the filter type / KEY / VEL / envelope are part of a preset
+            setPlain(*p, "pitchlfoshape", 3.f); setPlain(*p, "filterlfoshape", 4.f); setPlain(*p, "filtertype", 2.f);
+            setPlain(*p, "filterkey", 0.6f); setPlain(*p, "filtervel", 0.35f); setPlain(*p, "filterenv", -0.5f); setPlain(*p, "filterdecay", 0.8f);
+            check(p->savePreset("Filter Sound", err), "v0.21: save a preset with the new controls set");
+            setPlain(*p, "pitchlfoshape", 0.f); setPlain(*p, "filterlfoshape", 0.f); setPlain(*p, "filtertype", 0.f);
+            setPlain(*p, "filterkey", 0.f); setPlain(*p, "filtervel", 0.f); setPlain(*p, "filterenv", 0.f); setPlain(*p, "filterdecay", 0.1f);
+            check(p->loadPreset("Filter Sound"), "v0.21: load it back");
+            check(getPlain(*p, "pitchlfoshape") == 3.f && getPlain(*p, "filterlfoshape") == 4.f && getPlain(*p, "filtertype") == 2.f
+                  && near(getPlain(*p, "filterkey"), 0.6f) && near(getPlain(*p, "filtervel"), 0.35f) && near(getPlain(*p, "filterenv"), -0.5f) && near(getPlain(*p, "filterdecay"), 0.8f),
+                  "v0.21: LFO shapes, filter type, KEY, VEL, FILT ENV and FILT DECAY come back");
+            check(!p->isPresetModified(), "v0.21: ...and the preset is not marked modified right after loading");
+            // a preset file from before v0.21 (no mention of them) puts them at their defaults
+            {
+                auto oldXml = juce::parseXML(folder.getChildFile("Filter Sound.ipmohcpreset"));
+                juce::Array<juce::XmlElement*> drop;
+                for (auto* e : oldXml->getChildWithTagNameIterator("P"))
+                    for (const char* id : {"pitchlfoshape", "filterlfoshape", "filtertype", "filterkey", "filtervel", "filterenv", "filterdecay"})
+                        if (e->getStringAttribute("id") == id) drop.add(e);
+                const int nDropped = drop.size();
+                for (auto* e : drop) oldXml->removeChildElement(e, true);
+                check(nDropped == 7 && folder.getChildFile("pre021.ipmohcpreset").replaceWithText(oldXml->toString()), "v0.21 set-up: a preset file without the new parameters");
+                p->loadPreset("pre021");
+                check(getPlain(*p, "pitchlfoshape") == 0.f && getPlain(*p, "filterlfoshape") == 0.f && getPlain(*p, "filtertype") == 0.f
+                      && getPlain(*p, "filterkey") == 0.f && getPlain(*p, "filtervel") == 0.f && getPlain(*p, "filterenv") == 0.f && near(getPlain(*p, "filterdecay"), 0.4f),
+                      "v0.21: an older preset file loads the new controls at their defaults (the sound it always had)");
+            }
+
             // a file written by another version: a missing parameter -> default, an unknown one is ignored, an out-of-range value is clamped
             auto xml = juce::parseXML(folder.getChildFile(listed + ".ipmohcpreset"));
             bool removed = false;
@@ -566,7 +593,7 @@ int main()
             check(getPlain(*p, "table") == 1.f && near(getPlain(*p, "cutoff"), 0.5f) && near(getPlain(*p, "resonance"), 0.63f) && near(getPlain(*p, "fx"), 0.5f) && near(getPlain(*p, "comp"), 0.f),
                   "INIT puts the sound settings back to their defaults");
             check(near(getPlain(*p, "gain"), 0.55f), "...but leaves GAIN alone");
-            check(WT8AudioProcessor::presetParameterIds().size() == 15, "a preset has 15 parameters");
+            check(WT8AudioProcessor::presetParameterIds().size() == 22, "a preset has 22 parameters (15 + the 7 added in v0.21)");
             // every id in the list is a real parameter (a typo would silently store nothing)
             bool allReal = true; for (auto& id : WT8AudioProcessor::presetParameterIds()) if (p->apvts.getParameter(id) == nullptr) allReal = false;
             check(allReal, "every parameter a preset names exists");
@@ -831,7 +858,8 @@ int main()
             cp->setValueNotifyingHost(cp->getValue() + 1.0e-5f);
             check(!p->isPresetModified(), "a change smaller than any knob step (1e-5 of the range) does not count");
             setPlain(*p, "cutoff", cut);
-            for (const char* id : {"table", "cycle", "octave", "pitch", "attack", "release", "resonance", "fx", "fxtime", "pitchlfodepth", "pitchlforate", "filterlfodepth", "filterlforate", "comp"})
+            for (const char* id : {"table", "cycle", "octave", "pitch", "attack", "release", "resonance", "fx", "fxtime", "pitchlfodepth", "pitchlforate", "filterlfodepth", "filterlforate", "comp",
+                                    "pitchlfoshape", "filterlfoshape", "filtertype", "filterkey", "filtervel", "filterenv", "filterdecay"})
             {
                 auto* par = p->apvts.getParameter(id);
                 const float v0 = par->getValue();
@@ -840,7 +868,7 @@ int main()
                 par->setValueNotifyingHost(v0);
                 if (!flagged || p->isPresetModified()) { printf("    parameter %s does not behave as part of the preset\n", id); v9Ok = false; }
             }
-            check(!p->isPresetModified(), "each of the other 14 sound parameters marks it modified, and restoring it clears the mark");
+            check(!p->isPresetModified(), "each of the other 21 sound parameters marks it modified, and restoring it clears the mark");
 
             // what is not part of a preset never counts
             setPlain(*p, "gain", 0.1f); setPlain(*p, "pan", 0.9f); setPlain(*p, "output", -9.f); setPlain(*p, "seq_swing", 70.f); setPlain(*p, "seq_loop", 4.f);
