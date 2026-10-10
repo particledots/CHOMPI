@@ -163,6 +163,31 @@ class StepSequencer
         pattern that was replaced and `newSlot` = the slot that is live now. */
     bool takeSwitch(std::string* live, std::string& outgoing, int& newSlot, bool cancelQueue);
 
+
+    // ---- v0.16: slot chaining ----
+    // With CHAIN on, the sequencer itself walks through the pattern slots: the slot that is playing plays `chainRepeat(slot)` passes
+    // through its loop (the same "pass" the COND lane counts), then the next slot that holds a pattern (wrapping round after the last;
+    // empty slots are skipped) starts on its step 1, on the step boundary where the last pass ended. It does that on the audio thread,
+    // because only there is the loop end known to the sample, so it keeps its own copy of all 16 patterns (the "bank"). The processor
+    // hands the bank over with setChainBank() whenever a slot changes, and brackets every slot change with holdChain(true / false) so the
+    // audio thread cannot move to another slot half-way through. A queued switch (AT LOOP END) wins over the chain at the same boundary.
+    static constexpr int kChainSlots = 16;
+    static constexpr int kMaxRepeats = 16;
+    void setChain(bool on) { chainOn_.store(on, std::memory_order_relaxed); }
+    bool chainOn() const { return chainOn_.load(std::memory_order_relaxed); }
+    void setChainRepeat(int slot, int passes);   // 1..kMaxRepeats (clamped); slots outside 0..15 are ignored
+    int  chainRepeat(int slot) const;
+    /** Message thread. `texts` = the 16 slots as text (as from serialize()); `liveSlot` = the slot the live pattern belongs to (its
+        text is ignored: the live pattern is the truth). While `hold` is on the chain does not advance (it catches up at the next pass end). */
+    /** Returns false, and changes nothing, while a swap the audio thread has made has not been collected (takeSwitch / takeSwitchAll):
+        the caller's idea of which slot is live is out of date then. Collect, then call again. */
+    bool setChainBank(const std::string* texts, int liveSlot);
+    void holdChain(bool hold) { chainHold_.store(hold, std::memory_order_relaxed); }
+    /** Like takeSwitch, but also fills `slotTexts` (16 strings) with every slot's text except the live one (left empty), which is what a
+        message thread needs after the chain may have swapped several times since it last looked. `newSlot` = the live slot. */
+    bool takeSwitchAll(std::string* live, std::string* slotTexts, int& newSlot, bool cancelQueue);
+    int  chainLiveSlot() const;                  // the slot the audio thread believes is live (tests)
+
     // ---- audio thread ----
     void recordNote(int note, int velocity);
     void resetTransport();
@@ -210,6 +235,16 @@ class StepSequencer
     int     switchedSlot_ = -1;
     bool    switched_ = false;                   // under the lock
     std::atomic<bool> switchedFlag_{false};      // a copy of switched_ that can be read without the lock
+
+
+    // v0.16 chaining (all under the lock except the two atomics). bank_[chainCur_] is stale while that slot is live.
+    struct BankSlot { SeqStep steps[kMaxSteps]; int len = 0; };
+    BankSlot bank_[kChainSlots];
+    int  chainCur_ = 0;
+    int  chainRep_[kChainSlots];
+    int  chainPass_ = -1;                        // passes of the live pattern that have ended while counting; -1 = counting has not started
+    std::atomic<bool> chainOn_{false};
+    std::atomic<bool> chainHold_{false};
 
     // random choices (probability, random direction) are a pure function of (key, step counter); with SEED off the
     // key is redrawn whenever playback starts or the host jumps, so every start sounds different

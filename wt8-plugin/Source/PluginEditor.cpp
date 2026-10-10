@@ -16,8 +16,9 @@ juce::Font makeFont(float height, bool bold = false)
     return juce::Font(juce::FontOptions(height, bold ? juce::Font::bold : juce::Font::plain));
 }
 
-// v0.15: six sequencer rows (EDIT, PLAY, DIRECTION, SCALE, LANE, PATTERN) make the window 36 px taller than v0.14 (840 x 898)
-constexpr int kWindowW = 840, kWindowH = 934;
+// v0.15: six sequencer rows (EDIT, PLAY, DIRECTION, SCALE, LANE, PATTERN) made the window 36 px taller than v0.14 (840 x 898);
+// v0.16: a seventh row (CHAIN) makes it another 36 px taller
+constexpr int kWindowW = 840, kWindowH = 970;
 } // namespace
 
 // ---------------------------------------------------------------------------------------------
@@ -897,6 +898,26 @@ WT8Editor::WT8Editor(WT8AudioProcessor& p) : juce::AudioProcessorEditor(&p), pro
     loopEndBtn_.setClickingTogglesState(true);
     loopEndBtn_.setToggleState(proc_.getSlotAtLoopEnd(), juce::dontSendNotification);
     loopEndBtn_.onClick = [this] { proc_.setSlotAtLoopEnd(loopEndBtn_.getToggleState()); refreshSlotButtons(); };
+
+    // v0.16 slot chaining: CHAIN on / off, the pass count of the playing slot, and the order the chain follows (display only)
+    for (auto* l : {&rowChainLabel_, &repeatLabel_, &chainOrderLabel_})
+    {
+        l->setColour(juce::Label::textColourId, kDim);
+        l->getProperties().set("fontHeight", 11.0f);
+        l->setInterceptsMouseClicks(false, false);
+        addAndMakeVisible(*l);
+    }
+    rowChainLabel_.setJustificationType(juce::Justification::centredRight);
+    repeatLabel_.setJustificationType(juce::Justification::centredRight);
+    chainOrderLabel_.setJustificationType(juce::Justification::centredLeft);
+    rowChainLabel_.setText("CHAIN", juce::dontSendNotification);
+    addAndMakeVisible(chainBtn_);
+    chainBtn_.setClickingTogglesState(true);
+    chainBtn_.onClick = [this] { proc_.setChain(chainBtn_.getToggleState()); refreshChainControls(); };
+    for (int n = 1; n <= StepSequencer::kMaxRepeats; ++n) repeatBox_.addItem(juce::String(n) + "x", n);
+    addAndMakeVisible(repeatBox_);
+    repeatBox_.onChange = [this] { proc_.setSlotRepeats(proc_.getPatternSlot(), repeatBox_.getSelectedId()); refreshChainControls(); };
+    refreshChainControls();
     refreshSlotButtons();
 
     // presets (header): the sound settings - INIT, the starter presets built into the plugin, and the files in the preset folder,
@@ -931,7 +952,7 @@ WT8Editor::WT8Editor(WT8AudioProcessor& p) : juce::AudioProcessorEditor(&p), pro
     addAndMakeVisible(grid_);
 
     setResizable(true, true);
-    setResizeLimits(630, int(630.0 * kWindowH / kWindowW), 1260, int(1260.0 * kWindowH / kWindowW)); // 630 x 700 .. 1260 x 1401 (v0.9-v0.14: 840 x 898; v0.15: one more row, 840 x 934)
+    setResizeLimits(630, int(630.0 * kWindowH / kWindowW), 1260, int(1260.0 * kWindowH / kWindowW)); // 630 x 728 .. 1260 x 1455 (v0.9-v0.14: 840 x 898; v0.15: one more row, 840 x 934; v0.16: one more, 840 x 970)
     getConstrainer()->setFixedAspectRatio((double) kWindowW / kWindowH);
     setSize(kWindowW, kWindowH);
     grid_.refresh();
@@ -959,6 +980,7 @@ void WT8Editor::timerCallback()
     pendBtn_.setEnabled(dirBox_.getSelectedItemIndex() == 2);  // end-repeat only applies to the pendulum
 
     refreshSlotButtons();
+    refreshChainControls();
     refreshPresetBox(); // the "modified" marker follows the knobs (and the host's automation)
     grid_.setGlobalGate(*proc_.apvts.getRawParameterValue("seq_gate")); // the GATE lane shows this for steps without their own gate
     grid_.setLoopLength(juce::roundToInt(proc_.apvts.getRawParameterValue("seq_loop")->load())); // the ring view dims the steps beyond the loop
@@ -1135,6 +1157,28 @@ void WT8Editor::refreshSlotButtons()
                              : queued >= 0               ? "NEXT " + juce::String(queued + 1)
                                                          : juce::String("PATTERN");
     if (patLabel_.getText() != label) patLabel_.setText(label, juce::dontSendNotification);
+}
+
+// v0.16: the CHAIN row follows the processor (a project that was opened, a chain that moved to another slot)
+void WT8Editor::refreshChainControls()
+{
+    const int cur = proc_.getPatternSlot();
+    const bool on = proc_.getChain();
+    if (chainBtn_.getToggleState() != on) chainBtn_.setToggleState(on, juce::dontSendNotification);
+    const juce::String btnText = on ? "ON" : "OFF";
+    if (chainBtn_.getButtonText() != btnText) chainBtn_.setButtonText(btnText);
+    const juce::String lbl = "SLOT " + juce::String(cur + 1) + " PLAYS";
+    if (repeatLabel_.getText() != lbl) repeatLabel_.setText(lbl, juce::dontSendNotification);
+    const int rep = proc_.getSlotRepeats(cur);
+    if (repeatBox_.getSelectedId() != rep) repeatBox_.setSelectedId(rep, juce::dontSendNotification);
+    // the order the chain follows: every slot that holds a pattern, with its pass count ("1 x2 > 3 x1 > ...", then back to the first)
+    juce::String order;
+    for (int i = 0; i < WT8AudioProcessor::kPatternSlots; ++i)
+        if (proc_.patternSlotHasSteps(i)) order += (order.isEmpty() ? "" : "  >  ") + juce::String(i + 1) + " x" + juce::String(proc_.getSlotRepeats(i));
+    if (order.isNotEmpty()) order += "  > ...";
+    if (chainOrderLabel_.getText() != order) chainOrderLabel_.setText(order, juce::dontSendNotification);
+    const auto col = on ? kText : kDim;
+    if (chainOrderLabel_.findColour(juce::Label::textColourId) != col) chainOrderLabel_.setColour(juce::Label::textColourId, col);
 }
 
 void WT8Editor::setCopyMode(bool on)
@@ -1432,7 +1476,7 @@ void WT8Editor::resized()
         }
     }
 
-    for (auto* l : {&syncLabel_, &divLabel_, &laneLabel_, &dirLabel_, &scaleLabel_, &rootLabel_, &octLabel_, &patLabel_, &rowEditLabel_, &rowPlayLabel_})
+    for (auto* l : {&syncLabel_, &divLabel_, &laneLabel_, &dirLabel_, &scaleLabel_, &rootLabel_, &octLabel_, &patLabel_, &rowEditLabel_, &rowPlayLabel_, &rowChainLabel_, &repeatLabel_, &chainOrderLabel_})
         l->getProperties().set("fontHeight", 11.0f * scale);
 
     // header: preset bar in the empty space between the name and "particledots"
@@ -1484,6 +1528,13 @@ void WT8Editor::resized()
     for (auto& b : slotBtn_) { b.setBounds(controls.removeFromLeft(int(28 * scale))); controls.removeFromLeft(int(2 * scale)); }
     controls.removeFromLeft(int(4 * scale));
     put(copyBtn_, 56);
+
+    // CHAIN (v0.16): on / off, how many passes the playing slot plays, and the order the chain follows
+    nextRow();
+    put(rowChainLabel_, 66);
+    put(chainBtn_, 52);
+    put(repeatLabel_, 100); put(repeatBox_, 62);
+    chainOrderLabel_.setBounds(controls);
 
     grid_.setBounds(inner);
 }

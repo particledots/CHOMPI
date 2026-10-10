@@ -228,6 +228,11 @@ class WT8Editor : public juce::AudioProcessorEditor, private juce::Timer
     juce::Rectangle<int> seqBounds_;
     std::vector<juce::Rectangle<int>> seqDividers_; // v0.15: thin lines between control groups in a sequencer row
     juce::Label rowEditLabel_, rowPlayLabel_;       // v0.15 (six-row layout only): captions for the two new rows
+    // v0.16 slot chaining (the CHAIN row): CHAIN on / off, how many passes the playing slot plays, and the order the chain will follow
+    juce::Label rowChainLabel_, repeatLabel_, chainOrderLabel_;
+    juce::TextButton chainBtn_{"OFF"};
+    juce::ComboBox repeatBox_;
+    void refreshChainControls();
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(WT8Editor)
 };

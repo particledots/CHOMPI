@@ -184,6 +184,7 @@ StepSequencer::StepSequencer()
     try { std::random_device rd; seed ^= ((uint64_t) rd() << 32) ^ (uint64_t) rd(); } catch (...) {}
     rngState_ = mix64(seed) | 1ULL;
     runKey_ = mix64(rngState_ + 1);
+    for (int& r : chainRep_) r = 1;
 }
 
 uint64_t StepSequencer::nextRandom()
@@ -521,6 +522,54 @@ bool StepSequencer::takeSwitch(std::string* live, std::string& outgoing, int& ne
     return sw;
 }
 
+// ---- v0.16 slot chaining -------------------------------------------------------------------------------------------------------
+void StepSequencer::setChainRepeat(int slot, int passes)
+{
+    if (slot < 0 || slot >= kChainSlots) return;
+    Lock l(lock_);
+    chainRep_[slot] = std::max(1, std::min(kMaxRepeats, passes));
+}
+
+int StepSequencer::chainRepeat(int slot) const
+{
+    if (slot < 0 || slot >= kChainSlots) return 1;
+    Lock l(lock_);
+    return chainRep_[slot];
+}
+
+bool StepSequencer::setChainBank(const std::string* texts, int liveSlot)
+{
+    BankSlot tmp[kChainSlots];
+    for (int i = 0; i < kChainSlots; ++i) parseSteps(texts[i], tmp[i].steps, tmp[i].len); // outside the lock, like queueSwitch
+    Lock l(lock_);
+    if (switched_) return false; // a queued switch has landed since the caller last looked: `liveSlot` is stale
+    for (int i = 0; i < kChainSlots; ++i) bank_[i] = tmp[i];
+    chainCur_ = std::max(0, std::min(kChainSlots - 1, liveSlot));
+    return true;
+}
+
+bool StepSequencer::takeSwitchAll(std::string* live, std::string* slotTexts, int& newSlot, bool cancelQueue)
+{
+    Lock l(lock_);
+    if (live) *live = serializeSteps(steps_, len_);
+    const bool sw = switched_;
+    if (sw)
+    {
+        for (int i = 0; i < kChainSlots; ++i) slotTexts[i] = i == chainCur_ ? std::string() : serializeSteps(bank_[i].steps, bank_[i].len);
+        newSlot = chainCur_;
+        switched_ = false;
+        switchedFlag_.store(false, std::memory_order_relaxed);
+    }
+    if (cancelQueue) queuedSlot_.store(-1, std::memory_order_relaxed);
+    return sw;
+}
+
+int StepSequencer::chainLiveSlot() const
+{
+    Lock l(lock_);
+    return chainCur_;
+}
+
 // ------------------------------------------------------------------------------------------------
 void StepSequencer::recordNote(int note, int velocity)
 {
@@ -603,12 +652,33 @@ int StepSequencer::process(double sr, int numSamples, const SeqHostInfo& h, cons
     auto swapInQueued = [&]() {
         const int q = queuedSlot_.load(std::memory_order_relaxed);
         if (q < 0) return;
-        for (int i = 0; i < kMaxSteps; ++i) { outgoing_[i] = steps_[i]; steps_[i] = queued_[i]; }
+        // (v0.16: the replaced pattern also goes back into the bank under its own slot, and the queued slot becomes the live one)
+        for (int i = 0; i < kMaxSteps; ++i) { outgoing_[i] = steps_[i]; bank_[chainCur_].steps[i] = steps_[i]; steps_[i] = queued_[i]; }
+        bank_[chainCur_].len = len_;
+        chainCur_ = std::max(0, std::min(kChainSlots - 1, q));
         outgoingLen_ = len_; len_ = queuedLen_;
         switchedSlot_ = q; switched_ = true;
         switchedFlag_.store(true, std::memory_order_relaxed);
         queuedSlot_.store(-1, std::memory_order_relaxed);
         displayIdx_.store(-1, std::memory_order_relaxed);
+    };
+
+    // v0.16: the chain moves on to the next slot that holds a pattern (wrapping round); false = there is none, nothing changed
+    auto chainAdvance = [&]() -> bool {
+        for (int d = 1; d < kChainSlots; ++d)
+        {
+            const int j = (chainCur_ + d) % kChainSlots;
+            if (bank_[j].len <= 0) continue;
+            for (int i = 0; i < kMaxSteps; ++i) { outgoing_[i] = steps_[i]; bank_[chainCur_].steps[i] = steps_[i]; steps_[i] = bank_[j].steps[i]; }
+            bank_[chainCur_].len = len_;
+            outgoingLen_ = len_; len_ = bank_[j].len;
+            chainCur_ = j;
+            switchedSlot_ = j; switched_ = true;
+            switchedFlag_.store(true, std::memory_order_relaxed);
+            displayIdx_.store(-1, std::memory_order_relaxed);
+            return true;
+        }
+        return false;
     };
 
     bool running = false;
@@ -621,6 +691,7 @@ int StepSequencer::process(double sr, int numSamples, const SeqHostInfo& h, cons
         releaseHeld(0);
         wasRunning_ = false;
         step1Pending_.store(false, std::memory_order_relaxed); // a STEP 1 request is for a sequence that is running now
+        chainPass_ = -1; // (v0.16) the chain counts passes of a running sequence only
         swapInQueued();
         displayIdx_.store(-1, std::memory_order_relaxed);
         return n;
@@ -630,7 +701,7 @@ int StepSequencer::process(double sr, int numSamples, const SeqHostInfo& h, cons
 
     const double bpm = h.bpm > 0.0 ? h.bpm : 120.0;
     const double pps = bpm / 60.0 / sr; // quarter notes per sample
-    if (!wasRunning_) { releaseHeld(0); runKey_ = nextRandom(); kOff_ = 0; step1Pending_.store(false, std::memory_order_relaxed); } // SEED off: every start gets fresh random choices
+    if (!wasRunning_) { releaseHeld(0); runKey_ = nextRandom(); kOff_ = 0; chainPass_ = -1; step1Pending_.store(false, std::memory_order_relaxed); } // SEED off: every start gets fresh random choices
     if (s.followHost) step1Pending_.store(false, std::memory_order_relaxed); // STEP 1 is a Free-sync control: in Logic sync the bar decides
     double ppq0;
     if (s.followHost)
@@ -707,14 +778,29 @@ int StepSequencer::process(double sr, int numSamples, const SeqHostInfo& h, cons
         if (!s.followHost && step1Pending_.exchange(false, std::memory_order_relaxed))
         {
             kOff_ = k; // STEP 1: this step is step 1 of a new run through the pattern
+            chainPass_ = -1; // (v0.16) the chain counts again from this pass
             if (s.seed <= 0) { runKey_ = nextRandom(); key = runKey_; } // SEED off: fresh random choices, as when PLAY is pressed
         }
-        if (queuedSlot_.load(std::memory_order_relaxed) >= 0
-            && posMod(k - kOff_, passPeriod(loop, s.direction, s.pendRepeat)) == 0) // the pass through the loop ends here
+        if (posMod(k - kOff_, passPeriod(loop, s.direction, s.pendRepeat)) == 0) // a pass through the loop starts here (= the last one ended)
         {
-            swapInQueued();
-            kOff_ = k; // the queued pattern starts on its own first step
-            loop = loopFor();
+            if (queuedSlot_.load(std::memory_order_relaxed) >= 0)
+            {
+                swapInQueued();
+                kOff_ = k; // the queued pattern starts on its own first step
+                loop = loopFor();
+                chainPass_ = 0; // (v0.16) a queued switch wins over the chain; the chain counts the new pattern's passes from here
+            }
+            else if (!chainOn_.load(std::memory_order_relaxed))
+                chainPass_ = -1; // CHAIN off: counting starts at the first pass start after it is switched on
+            else
+            {
+                chainPass_ = chainPass_ < 0 ? 0 : chainPass_ + 1; // v0.16: the first start only begins the count; every later one ends a pass
+                if (!chainHold_.load(std::memory_order_relaxed) && chainPass_ >= std::max(1, chainRep_[chainCur_]))
+                {
+                    if (chainAdvance()) { kOff_ = k; loop = loopFor(); } // the next slot starts on its own first step
+                    chainPass_ = 0;
+                }
+            }
         }
         const long long kk = k - kOff_;
         const int idx = stepIndexFor(kk, loop, s.direction, s.pendRepeat, key);

@@ -74,6 +74,14 @@ class WT8AudioProcessor : public juce::AudioProcessor
         playing slot while one is queued cancels the queue. */
     void requestPatternSlot(int slot);
     int  getQueuedPatternSlot() const { return seq_.queuedSlot(); } // -1 = none
+    // ---- v0.16 slot chaining (see StepSequencer): with CHAIN on, the playing slot plays its REPEAT count of passes through the loop
+    // and the sequencer then moves on to the next slot that holds a pattern, wrapping round. Both the switch and the per-slot counts
+    // (1..16, default 1) are saved with the project (an older project has CHAIN off and every count 1); neither is automatable.
+    // The processor keeps the sequencer's copy of all slots (its "bank") up to date; see ChainHold.
+    bool getChain() const { return seq_.chainOn(); }
+    void setChain(bool on) { seq_.setChain(on); }
+    int  getSlotRepeats(int slot) const { return seq_.chainRepeat(slot); }
+    void setSlotRepeats(int slot, int passes) { seq_.setChainRepeat(slot, passes); }
     /** v0.14 RANDOM: replaces the current pattern with random notes and rests (see StepSequencer::randomize). Length = the LOOP knob
         (ALL: the pattern's length, or 16 when it is empty); notes from C3 up two octaves, only scale tones when SCALE is set; each
         step is a rest with a 25 % chance. Message thread. Returns the number of steps made. */
@@ -154,6 +162,17 @@ class WT8AudioProcessor : public juce::AudioProcessor
     /** (slotLock_ held) Collects a queued pattern the audio thread has swapped in since the last call: the replaced pattern goes into
         its slot's text and the new slot becomes current. `live` (if not null) gets the live pattern's text, `cancelQueue` drops any queue. */
     void syncSlotsLocked(std::string* live, bool cancelQueue) const;
+    // v0.16: every function that changes which slot holds what (select, copy, load a project) runs inside a ChainHold: while one exists the
+    // audio thread does not advance the chain, so the slot bookkeeping cannot be overtaken half-way; when the outermost one ends, the
+    // sequencer gets the new slot contents (pushChainBankLocked) before the hold is released. slotLock_ must be held.
+    mutable int holdDepth_ = 0;
+    void pushChainBankLocked() const;
+    struct ChainHold
+    {
+        const WT8AudioProcessor& p;
+        explicit ChainHold(const WT8AudioProcessor& proc) : p(proc) { if (p.holdDepth_++ == 0) p.seq_.holdChain(true); }
+        ~ChainHold() { if (--p.holdDepth_ == 0) { p.pushChainBankLocked(); p.seq_.holdChain(false); } }
+    };
     juce::File presetFolderOverride_;
     void applyPresetValues(const std::map<juce::String, float>& values);
     void markPresetCurrent(PresetKind kind, const juce::String& name); // remembers the live sound parameters as this preset's values

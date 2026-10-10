@@ -375,6 +375,13 @@ void WT8AudioProcessor::getStateInformation(juce::MemoryBlock& destData)
     apvts.state.setProperty("transpose", seqTranspose_.load(), nullptr);
     apvts.state.setProperty("slotLoopEnd", slotAtLoopEnd_.load() ? 1 : 0, nullptr); // v0.13; a project without it switches at once, as before
     {
+        // v0.16 chaining: the switch and the 16 per-slot pass counts; a project without them has CHAIN off and every count 1
+        apvts.state.setProperty("chainOn", seq_.chainOn() ? 1 : 0, nullptr);
+        juce::String reps;
+        for (int i = 0; i < kPatternSlots; ++i) reps += (i ? "," : "") + juce::String(seq_.chainRepeat(i));
+        apvts.state.setProperty("chainRep", reps, nullptr);
+    }
+    {
         // v0.8 pattern slots: the current slot is "sequence"; the other slots that hold anything are saved as pat<n>.
         // A project saved before v0.8 has none of these and loads with its pattern in slot 1.
         // (v0.13: a queued switch that the audio thread has just carried out is collected first, in the same step as reading the
@@ -425,6 +432,7 @@ void WT8AudioProcessor::setStateInformation(const void* data, int sizeInBytes)
             // and plugin_test checks it, so a project saved by v0.3 plays as before.)
             {
                 const juce::ScopedLock sl(slotLock_);
+                const ChainHold hold(*this); // v0.16: the audio thread does not move the chain while the slots are being replaced
                 // v0.13: whatever was queued belongs to the old project (cancel first, so no swap can land in the loaded pattern)
                 std::string discardedText; int discardedSlot = 0;
                 seq_.takeSwitch(nullptr, discardedText, discardedSlot, true);
@@ -433,6 +441,17 @@ void WT8AudioProcessor::setStateInformation(const void* data, int sizeInBytes)
                 slotCur_ = juce::jlimit(0, kPatternSlots - 1, (int) apvts.state.getProperty("patCur", 0));
                 for (int i = 0; i < kPatternSlots; ++i)
                     slots_[i] = i == slotCur_ ? std::string() : apvts.state.getProperty(juce::Identifier("pat" + juce::String(i))).toString().toStdString();
+                // v0.16: CHAIN switch and pass counts (missing in older projects: off, 1 each; a malformed count is 1)
+                seq_.setChain((int) apvts.state.getProperty("chainOn", 0) != 0);
+                const juce::String reps = apvts.state.getProperty("chainRep", juce::String()).toString();
+                for (int i = 0, pos = 0; i < kPatternSlots; ++i)
+                {
+                    // (split by hand, so an empty entry still counts as a position)
+                    const int comma = pos >= reps.length() ? -1 : reps.indexOfChar(pos, ',');
+                    const juce::String tok = pos >= reps.length() ? juce::String() : (comma < 0 ? reps.substring(pos) : reps.substring(pos, comma));
+                    pos = comma < 0 ? reps.length() : comma + 1;
+                    seq_.setChainRepeat(i, tok.isNotEmpty() && tok.length() <= 6 && tok.containsOnly("0123456789") ? tok.getIntValue() : 1);
+                }
             }
             setSeqTranspose((int) apvts.state.getProperty("transpose", 0)); // states saved before v0.5 have none: 0
             for (int i = 0; i < kTableSlots; ++i)
@@ -479,14 +498,27 @@ void WT8AudioProcessor::setStateInformation(const void* data, int sizeInBytes)
 // v0.8 pattern slots
 void WT8AudioProcessor::syncSlotsLocked(std::string* live, bool cancelQueue) const
 {
-    // The slot list can only be out of date when the audio thread has swapped a queued pattern in; asking costs nothing unless it has.
+    // The slot list can only be out of date when the audio thread has swapped patterns (a queued switch, or since v0.16 the chain, which
+    // can have moved on several times); asking costs nothing unless it has. The sequencer's own copy of the slots is then the truth.
     if (live == nullptr && !cancelQueue && !seq_.switchPending()) return;
-    std::string outgoing; int newSlot = slotCur_;
-    if (seq_.takeSwitch(live, outgoing, newSlot, cancelQueue))
+    std::string texts[kPatternSlots]; int newSlot = slotCur_;
+    if (seq_.takeSwitchAll(live, texts, newSlot, cancelQueue))
     {
-        slots_[slotCur_] = outgoing;                        // the pattern that was playing goes back into its own slot
-        slotCur_ = juce::jlimit(0, kPatternSlots - 1, newSlot); // and the queued slot is the live one now
+        for (int i = 0; i < kPatternSlots; ++i) slots_[i] = texts[i]; // (the live slot's entry is empty: seq_ holds that pattern)
+        slotCur_ = juce::jlimit(0, kPatternSlots - 1, newSlot);       // and the slot the sequencer is on is the live one now
     }
+}
+
+void WT8AudioProcessor::pushChainBankLocked() const
+{
+    // A queued switch (AT LOOP END) can land at any moment, even while a ChainHold is on (the hold only stops the chain). So collect first,
+    // and let the sequencer refuse the bank if another swap landed in between; then collect again and retry.
+    for (int attempt = 0; attempt < 16; ++attempt)
+    {
+        syncSlotsLocked(nullptr, false);
+        if (seq_.setChainBank(slots_, slotCur_)) return;
+    }
+    jassertfalse; // (cannot happen: at most one queued switch can be waiting, and it lands once)
 }
 
 int WT8AudioProcessor::getPatternSlot() const
@@ -508,6 +540,7 @@ void WT8AudioProcessor::selectPatternSlot(int slot)
 {
     slot = juce::jlimit(0, kPatternSlots - 1, slot);
     const juce::ScopedLock sl(slotLock_);
+    const ChainHold hold(*this); // v0.16
     std::string live;
     syncSlotsLocked(&live, true); // a switch that was queued is dropped: this click decides
     if (slot == slotCur_) return;
@@ -533,6 +566,7 @@ bool WT8AudioProcessor::copyPatternSlot(int from, int to)
 {
     if (from < 0 || from >= kPatternSlots || to < 0 || to >= kPatternSlots || from == to) return false;
     const juce::ScopedLock sl(slotLock_);
+    const ChainHold hold(*this); // v0.16
     std::string live;
     syncSlotsLocked(&live, false);
     const std::string text = from == slotCur_ ? live : slots_[from]; // the current slot's truth is the live pattern
@@ -563,6 +597,7 @@ void WT8AudioProcessor::requestPatternSlot(int slot)
 {
     slot = juce::jlimit(0, kPatternSlots - 1, slot);
     const juce::ScopedLock sl(slotLock_);
+    const ChainHold hold(*this); // v0.16 (nests with the one in selectPatternSlot)
     syncSlotsLocked(nullptr, false);
     if (!slotAtLoopEnd_.load()) { selectPatternSlot(slot); return; }
     if (slot == slotCur_) { syncSlotsLocked(nullptr, true); return; } // the playing slot was clicked: cancel what was waiting

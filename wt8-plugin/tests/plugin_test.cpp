@@ -5,7 +5,11 @@
 #include <limits>
 #include <cstdio>
 #include <cmath>
+#include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <memory>
+#include <thread>
 #include <vector>
 
 static float rms(const juce::AudioBuffer<float>& b, int ch)
@@ -1417,7 +1421,191 @@ int main()
         printf("v0.14 RANDOM: %s\n", v14Ok ? "ok" : "FAILED");
     }
 
-    bool ok = seqOk && v4Ok && v5Ok && v6Ok && v8Ok && v9Ok && v10Ok && v13Ok && v14Ok && finite && peak > 0.02f && peak <= 1.5f && held > 0.005f && tail < held * 0.05f && std::fabs(cutoff - 0.2f) < 0.01f;
+    // ---- v0.16: slot chaining through the real processor ----
+    bool v16Ok = true;
+    {
+        auto check = [&](bool cond, const char* what) { printf("  %s: %s\n", cond ? "ok  " : "FAIL", what); v16Ok = v16Ok && cond; };
+        auto makeProc = [&]() { auto pr = std::make_unique<WT8AudioProcessor>(); pr->setPlayConfigDetails(0, 2, sr, bs); pr->prepareToPlay(sr, bs); return pr; };
+        juce::AudioBuffer<float> b(2, bs); juce::MidiBuffer none; bool fin = true; float pk = 0;
+        auto runB = [&](WT8AudioProcessor& pr, int blocks) {
+            pk = 0;
+            for (int blk = 0; blk < blocks; ++blk) { b.clear(); pr.processBlock(b, none); for (int i = 0; i < bs; ++i) { const float v = b.getSample(0, i); if (!std::isfinite(v)) fin = false; pk = std::fmax(pk, std::fabs(v)); } }
+        };
+        auto textOf = [](std::initializer_list<int> notes) { StepSequencer t; for (int n : notes) t.recordNote(n, 100); return t.serialize(); };
+        const std::string patA = textOf({60, 64, 67, 72}), patB = textOf({48, 50, 53}), patC = textOf({40, 43});
+        auto fill = [&](WT8AudioProcessor& pr, std::initializer_list<int> notes) { for (int n : notes) pr.sequencer().recordNote(n, 100); };
+        // slot 1 = A (4 steps), slot 5 = B (3 steps), slot 9 = C (2 steps); slot 1 is playing; 1/16 at 120 bpm: a step is ~10.8 blocks
+        auto setUp = [&](bool chain, bool play) {
+            auto pr = makeProc();
+            fill(*pr, {60, 64, 67, 72});
+            pr->selectPatternSlot(4); fill(*pr, {48, 50, 53});
+            pr->selectPatternSlot(8); fill(*pr, {40, 43});
+            pr->selectPatternSlot(0);
+            pr->setChain(chain);
+            if (play) { pr->apvts.getParameter("seq_play")->setValueNotifyingHost(1.f); runB(*pr, 14); }
+            return pr;
+        };
+        // polls the current slot after every block; returns the list of slots seen, in order (each only when it changes)
+        auto walk = [&](WT8AudioProcessor& pr, int blocks, std::vector<int>* when = nullptr) {
+            std::vector<int> seen; int last = pr.getPatternSlot(); seen.push_back(last);
+            for (int blk = 0; blk < blocks; ++blk) { runB(pr, 1); const int c = pr.getPatternSlot(); if (c != last) { seen.push_back(c); if (when) when->push_back(blk + 1); last = c; } }
+            return seen;
+        };
+        auto slotText = [&](WT8AudioProcessor& pr, int slot) { // the text a slot would be saved with
+            juce::MemoryBlock mb; pr.getStateInformation(mb);
+            auto xml = juce::AudioProcessor::getXmlFromBinary(mb.getData(), (int) mb.getSize());
+            return slot == xml->getIntAttribute("patCur") ? xml->getStringAttribute("sequence").toStdString() : xml->getStringAttribute("pat" + juce::String(slot)).toStdString();
+        };
+
+        // defaults
+        {
+            auto p = makeProc();
+            bool allOne = true; for (int i = 0; i < 16; ++i) if (p->getSlotRepeats(i) != 1) allOne = false;
+            check(!p->getChain() && allOne, "CHAIN is off and every slot plays 1 pass by default");
+            p->setSlotRepeats(3, 99); p->setSlotRepeats(4, 0); p->setSlotRepeats(99, 5);
+            check(p->getSlotRepeats(3) == 16 && p->getSlotRepeats(4) == 1 && p->getSlotRepeats(99) == 1, "counts are clamped to 1..16, a slot out of range is ignored");
+        }
+        // CHAIN off: nothing ever moves
+        {
+            auto p = setUp(false, true);
+            auto seen = walk(*p, 400);
+            check(seen.size() == 1 && seen[0] == 0 && p->sequencer().serialize() == patA && !p->sequencer().switchPending(), "CHAIN off: the playing slot stays (8 passes and more go by)");
+        }
+        // the walk: 1 x1, 5 x1, 9 x2, round again; a pass of A is 4 steps (~43 blocks), of B 3 steps (~32), of C 2 steps (~22)
+        {
+            auto p = setUp(true, true); p->setSlotRepeats(8, 2);
+            std::vector<int> when; auto seen = walk(*p, 600, &when);
+            const std::vector<int> want = {0, 4, 8, 0, 4, 8, 0, 4, 8, 0, 4, 8};
+            check(seen.size() >= want.size() && std::equal(want.begin(), want.end(), seen.begin()), "slot 1, 5, 9, then round again to 1, 5, 9 ...: the slots are visited in order, empty ones skipped");
+            // A started after the 14 set-up blocks; its first boundary (a step is 5512.5 samples) lies about 29 blocks into the walk
+            check(when.size() >= 3 && when[0] > 20 && when[0] < 40 && when[1] - when[0] > 24 && when[1] - when[0] < 40 && when[2] - when[1] > 36 && when[2] - when[1] < 52,
+                  "the switches come at pass ends: A's pass ~43 blocks, B's ~32, C x2 ~43");
+            check(fin && pk > 0.01f, "audio stays finite and keeps sounding through the swaps");
+            // nothing was lost or exchanged: every slot still holds its own pattern
+            std::string t0 = slotText(*p, 0), t4 = slotText(*p, 4), t8 = slotText(*p, 8);
+            const int cur = p->getPatternSlot();
+            // (the live slot's own text is `sequence`; the others are pat<n>)
+            check((cur == 0 ? t0 == patA : t0 == patA) && (cur == 4 ? t4 == patB : t4 == patB) && (cur == 8 ? t8 == patC : t8 == patC), "every slot still holds its own pattern after many swaps");
+            check(p->patternSlotHasSteps(0) && p->patternSlotHasSteps(4) && p->patternSlotHasSteps(8) && !p->patternSlotHasSteps(1) && !p->patternSlotHasSteps(2), "...and the empty slots are still empty");
+        }
+        // saving in the middle of a chain (swaps nobody has collected) files the patterns under the right slots; counts and CHAIN come back
+        {
+            auto p = setUp(true, true); p->setSlotRepeats(0, 2); p->setSlotRepeats(8, 3);
+            bool pending = false;
+            for (int blk = 0; blk < 300 && !pending; ++blk) { runB(*p, 1); pending = p->sequencer().switchPending(); }
+            check(pending, "set-up: the chain has moved on and nobody has collected it");
+            juce::MemoryBlock st; p->getStateInformation(st);
+            auto xml = juce::AudioProcessor::getXmlFromBinary(st.getData(), (int) st.getSize());
+            check(xml->getIntAttribute("chainOn") == 1 && xml->getStringAttribute("chainRep") == "2,1,1,1,1,1,1,1,3,1,1,1,1,1,1,1", "the file says CHAIN on and the 16 counts");
+            auto q = makeProc(); q->setStateInformation(st.getData(), (int) st.getSize());
+            check(q->getChain() && q->getSlotRepeats(0) == 2 && q->getSlotRepeats(8) == 3 && q->getSlotRepeats(4) == 1, "CHAIN and the counts come back with the project");
+            const int cur = q->getPatternSlot();
+            check(cur == 4 && q->sequencer().serialize() == patB, "the project reopens on the slot that was playing (slot 5) with its own pattern");
+            q->selectPatternSlot(0); check(q->sequencer().serialize() == patA, "...slot 1 holds the first pattern");
+            q->selectPatternSlot(8); check(q->sequencer().serialize() == patC, "...slot 9 holds the third");
+            // the reopened project chains on from where it was saved
+            auto r = makeProc(); r->setStateInformation(st.getData(), (int) st.getSize());
+            r->apvts.getParameter("seq_play")->setValueNotifyingHost(1.f);
+            auto seen = walk(*r, 400);
+            check(seen.size() >= 3 && seen[0] == 4 && seen[1] == 8 && seen[2] == 0, "a reopened project chains on: 5, then 9, then 1");
+            // an older project has neither property: CHAIN off, every count 1
+            xml->removeAttribute("chainOn"); xml->removeAttribute("chainRep");
+            juce::MemoryBlock old; juce::AudioProcessor::copyXmlToBinary(*xml, old);
+            auto o = makeProc(); o->setChain(true); o->setSlotRepeats(2, 7);
+            o->setStateInformation(old.getData(), (int) old.getSize());
+            check(!o->getChain() && o->getSlotRepeats(0) == 1 && o->getSlotRepeats(2) == 1 && o->getSlotRepeats(8) == 1, "a project from before v0.16: CHAIN off, every count 1");
+            xml->setAttribute("chainRep", "x,0,99,,3"); xml->setAttribute("chainOn", 1);
+            juce::MemoryBlock bad; juce::AudioProcessor::copyXmlToBinary(*xml, bad);
+            auto m = makeProc(); m->setStateInformation(bad.getData(), (int) bad.getSize());
+            check(m->getChain() && m->getSlotRepeats(0) == 1 && m->getSlotRepeats(1) == 1 && m->getSlotRepeats(2) == 16 && m->getSlotRepeats(3) == 1 && m->getSlotRepeats(4) == 3 && m->getSlotRepeats(5) == 1, "a damaged count list does not break loading (bad entries 1, 0 -> 1, 99 -> 16)");
+        }
+        // COPY into a slot while the chain runs: the chain plays the copy
+        {
+            auto p = setUp(true, true);
+            check(p->copyPatternSlot(0, 4), "set-up: copy slot 1 (playing) onto slot 5 while the chain runs");
+            int moved = -1; for (int blk = 0; blk < 200 && moved < 0; ++blk) { runB(*p, 1); if (p->getPatternSlot() != 0) moved = p->getPatternSlot(); }
+            check(moved == 4 && p->sequencer().serialize() == patA, "the chain moves to slot 5 and plays the copy (A), not the old B");
+            check(slotText(*p, 0) == patA && slotText(*p, 8) == patC, "the other slots are untouched");
+        }
+        // clicking a slot while the chain runs (switch OFF = at once): the chain goes on from the clicked slot
+        {
+            auto p = setUp(true, true);
+            p->requestPatternSlot(8);
+            check(p->getPatternSlot() == 8 && p->sequencer().serialize() == patC, "a click switches at once (AT LOOP END off) as before");
+            auto seen = walk(*p, 200);
+            check(seen.size() >= 2 && seen[0] == 8 && seen[1] == 0, "...and the chain carries on from there: after slot 9 comes slot 1 (round again)");
+            check(slotText(*p, 4) == patB, "slot 5 still holds B");
+        }
+        // AT LOOP END + chain: a queued slot comes in at the loop end (queue wins), then the chain goes on from it
+        {
+            auto p = setUp(true, true); p->setSlotAtLoopEnd(true); p->setSlotRepeats(0, 3);
+            p->requestPatternSlot(8);
+            check(p->getQueuedPatternSlot() == 8, "set-up: slot 9 queued while slot 1 (3 passes) plays");
+            auto seen = walk(*p, 300);
+            check(seen.size() >= 3 && seen[0] == 0 && seen[1] == 8 && seen[2] == 0, "the queued slot 9 comes in at the first loop end, then the chain moves on (round to slot 1)");
+        }
+        // stopped / record armed: nothing chains
+        {
+            auto p = setUp(true, false);
+            auto seen = walk(*p, 200);
+            check(seen.size() == 1 && seen[0] == 0, "stopped: the chain does not move");
+        }
+        // Logic sync (no play head here: the plugin falls back to free-run only when SYNC is Free, so only the stop is checked)
+        // the stress test: the audio thread chains as fast as it can while the message thread clicks, collects and saves; nothing may be lost
+        {
+            auto p = makeProc();
+            std::vector<std::string> start;
+            const std::vector<std::initializer_list<int>> notes = {{60}, {62, 64}, {65, 67, 69}, {50, 52, 53, 55}, {70, 71}, {72}, {30, 31, 32}, {80, 81}};
+            for (size_t i = 0; i < notes.size(); ++i) { p->selectPatternSlot((int) (i * 2)); for (int n : notes[i]) p->sequencer().recordNote(n, 100); }
+            p->selectPatternSlot(0);
+            // 8 patterns in slots 0,2,4,...,14; one pass of every pattern is 1-4 steps; fast tempo is not available, so the passes are many blocks
+            // long, so use a loop of 1 (a pass is one step) and the shortest step length to make swaps frequent
+            { auto* sp = dynamic_cast<juce::RangedAudioParameter*>(p->apvts.getParameter("seq_loop")); sp->setValueNotifyingHost(sp->convertTo0to1(1.f)); }
+            { auto* sp = dynamic_cast<juce::RangedAudioParameter*>(p->apvts.getParameter("seq_div")); sp->setValueNotifyingHost(sp->convertTo0to1(3.f)); } // 1/32
+            p->setChain(true);
+            p->apvts.getParameter("seq_play")->setValueNotifyingHost(1.f);
+            std::vector<std::string> before; for (int i = 0; i < 16; ++i) before.push_back(slotText(*p, i));
+            std::atomic<bool> stop{false}; std::atomic<long> blocksDone{0}; std::atomic<bool> audioFin{true};
+            std::thread audio([&] {
+                juce::AudioBuffer<float> ab(2, bs); juce::MidiBuffer nm;
+                while (!stop.load()) { ab.clear(); p->processBlock(ab, nm); for (int i = 0; i < bs; i += 64) if (!std::isfinite(ab.getSample(0, i))) audioFin = false; ++blocksDone; }
+            });
+            long clicks = 0, saves = 0, copies = 0; unsigned seed = 12345;
+            auto rnd = [&](int n) { seed = seed * 1664525u + 1013904223u; return (int) ((seed >> 8) % (unsigned) n); };
+            const auto t0 = std::chrono::steady_clock::now();
+            while (std::chrono::steady_clock::now() - t0 < std::chrono::seconds(4))
+            {
+                switch (rnd(7))
+                {
+                    case 0: p->selectPatternSlot(rnd(16)); ++clicks; break;
+                    case 1: p->requestPatternSlot(rnd(16)); ++clicks; break;
+                    case 2: p->getPatternSlot(); break;
+                    case 3: { juce::MemoryBlock mb; p->getStateInformation(mb); ++saves; break; }
+                    case 4: for (int i = 0; i < 16; ++i) p->patternSlotHasSteps(i); break;
+                    case 5: p->setSlotRepeats(rnd(16), 1 + rnd(3)); break;
+                    default: p->setSlotAtLoopEnd(rnd(2) != 0); break;
+                }
+                std::this_thread::sleep_for(std::chrono::microseconds(200));
+            }
+            stop = true; audio.join();
+            p->setSlotAtLoopEnd(false);
+            std::vector<std::string> after; for (int i = 0; i < 16; ++i) after.push_back(slotText(*p, i));
+            auto sorted = [](std::vector<std::string> v) { std::sort(v.begin(), v.end()); return v; };
+            check(sorted(before) == sorted(after), "stress (4 s, audio thread chaining flat out, message thread clicking and saving): the 16 patterns are the same set as before, nothing lost or duplicated");
+            // the patterns are filed under the slots they started in, whenever the slot that is live is the one it started in; at least the live slot's pattern is the live one
+            const int cur = p->getPatternSlot();
+            check(p->sequencer().serialize() == after[cur], "...and the live pattern is the one filed under the current slot");
+            // every slot that held a pattern still holds exactly its own (only selections happened, no edits, so each slot's text is unchanged)
+            bool same = true; for (int i = 0; i < 16; ++i) if (before[i] != after[i]) { same = false; printf("    slot %d: before [%s] after [%s]\n", i + 1, before[i].c_str(), after[i].c_str()); }
+            check(same, "...and every slot still holds its own pattern");
+            check(audioFin, "audio stayed finite");
+            printf("  (stress: %ld audio blocks, %ld slot clicks, %ld saves)\n", blocksDone.load(), clicks, saves);
+            check(blocksDone.load() > 2000 && clicks > 200, "the stress run actually ran");
+        }
+        printf("v0.16 slot chaining: %s\n", v16Ok ? "ok" : "FAILED");
+    }
+
+    bool ok = seqOk && v4Ok && v5Ok && v6Ok && v8Ok && v9Ok && v10Ok && v13Ok && v14Ok && v16Ok && finite && peak > 0.02f && peak <= 1.5f && held > 0.005f && tail < held * 0.05f && std::fabs(cutoff - 0.2f) < 0.01f;
     printf(ok ? "PASS\n" : "FAIL\n");
     return ok ? 0 : 1;
 }

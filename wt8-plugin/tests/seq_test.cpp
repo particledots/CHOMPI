@@ -1,6 +1,7 @@
 // Headless timing tests for StepSequencer (no JUCE, no audio).  Run: ./seq_test
 #include "StepSequencer.h"
 #include "RingLayout.h"
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cmath>
@@ -1199,6 +1200,271 @@ int main()
           SeqSettings off = st; off.play = false; SeqEvent buf[16]; SeqHostInfo h; h.bpm = bpm;
           const int nEv = x.process(sr, 512, h, off, buf, 16); for (int i = 0; i < nEv; ++i) total += buf[i].on ? 1 : -1;
           CHECK(total == 0, "nothing is left sounding after a stop (%d)", total); }
+    }
+
+    // ---- T33 (v0.16): slot chaining ----
+    {
+        printf("T33 slot chaining (v0.16): N passes per slot, then the next slot that holds a pattern, wrapping round\n");
+        const double sr = 48000, bpm = 120;
+        SeqSettings st; st.play = true; st.division = 2; st.gate = 0.5f; // 1/16 = 6000 samples per step
+        const long long step = 6000;
+        auto pat = [](std::initializer_list<int> notes) { StepSequencer t; fill(t, notes); return t.serialize(); };
+        const std::string A = pat({60, 62, 64, 65, 67, 69}), B = pat({72, 74, 76, 77, 79, 81, 83}), C = pat({50, 52, 54});
+        auto setup = [&](StepSequencer& q, const std::string& live, std::initializer_list<std::pair<int, std::string>> others, int liveSlot, bool chainOn) {
+            q.deserialize(live);
+            std::string texts[16]; for (auto& o : others) texts[o.first] = o.second;
+            q.setChainBank(texts, liveSlot); q.setChain(chainOn);
+        };
+        // the events a chain should make: each segment is a fresh run of that pattern for `passes` passes (a pass = `period` steps)
+        struct Seg { const std::string* pat; int passes; };
+        auto expected = [&](const SeqSettings& c, const std::vector<Seg>& plan, long long total) {
+            std::vector<Ev> out; long long at = 0;
+            for (size_t i = 0; at < total; i = (i + 1) % plan.size())
+            {
+                StepSequencer f; f.deserialize(*plan[i].pat);
+                const int len = f.length(); const int loop = c.loopLen <= 0 ? len : std::max(1, std::min(c.loopLen, len));
+                const long long dur = plan[i].passes * StepSequencer::passPeriod(loop, c.direction, c.pendRepeat) * step;
+                auto r = run(f, c, bpm, sr, 512, dur, false);
+                for (auto& x : r) if (x.on) out.push_back({x.pos + at, true, x.note, x.vel});
+                at += dur;
+            }
+            return out;
+        };
+        auto onsBefore = [](const std::vector<Ev>& e, long long to) { std::vector<Ev> v; for (auto& x : e) if (x.on && x.pos < to) v.push_back(x); return v; };
+        auto samePos = [](const std::vector<Ev>& a, const std::vector<Ev>& b) {
+            if (a.size() != b.size()) return false;
+            for (size_t i = 0; i < a.size(); ++i) if (std::llabs(a[i].pos - b[i].pos) > 1 || a[i].note != b[i].note) return false;
+            return true;
+        };
+        auto balancedEv = [](const std::vector<Ev>& e) { int bal = 0; for (auto& x : e) { bal += x.on ? 1 : -1; if (bal < 0 || bal > 1) return false; } return true; };
+
+        // the basic walk: slot 1 (A) x2, slot 2 (B) x1, slot 5 (C) x3, then round again; slots 3 and 4 are empty and skipped
+        {
+            SeqSettings c = st; c.seed = 5;
+            const long long total = (12 + 7 + 9) * step * 3;
+            StepSequencer a; setup(a, A, {{1, B}, {4, C}}, 0, true); a.setChainRepeat(0, 2); a.setChainRepeat(1, 1); a.setChainRepeat(4, 3);
+            auto all = run(a, c, bpm, sr, 512, total + 500, false); // (a little past the last pass start, so the swap back to A has happened)
+            CHECK(samePos(onsBefore(all, total), onsBefore(expected(c, {{&A, 2}, {&B, 1}, {&C, 3}}, total), total)), "A x2, B x1, C x3, then A again: the notes are those of a fresh run of each pattern, to the sample");
+            CHECK(balancedEv(all), "chain: notes alternate on / off");
+            std::string live, texts[16]; int slot = -1;
+            const bool got = a.takeSwitchAll(&live, texts, slot, false);
+            CHECK(got && slot == 0 && live == A, "after 3 whole cycles slot 1 is live again (slot %d)", slot);
+            CHECK(texts[1] == B && texts[4] == C && texts[0].empty() && texts[2].empty() && texts[3].empty(), "the other slots come back with their own patterns");
+            CHECK(!a.takeSwitchAll(&live, texts, slot, false), "...and the swap is reported once");
+            // stopped in the middle of C
+            StepSequencer m; setup(m, A, {{1, B}, {4, C}}, 0, true); m.setChainRepeat(0, 2); m.setChainRepeat(1, 1); m.setChainRepeat(4, 3);
+            run(m, c, bpm, sr, 512, (12 + 7) * step + 3000, false);
+            CHECK(m.chainLiveSlot() == 4 && m.takeSwitchAll(&live, texts, slot, false) && slot == 4 && live == C && texts[0] == A && texts[1] == B, "in the middle of C's first pass slot 5 is live, A and B are back in the bank");
+        }
+
+        // every direction, loop 4, probability and a fixed seed: still exactly a fresh run of each pattern
+        {
+            struct Case { int dir; bool rep; const char* name; };
+            for (const Case cs : {Case{0, false, "forward"}, Case{1, false, "backward"}, Case{2, false, "pendulum"}, Case{2, true, "pendulum ends x2"}, Case{3, false, "random"}})
+            {
+                SeqSettings c = st; c.direction = cs.dir; c.pendRepeat = cs.rep; c.loopLen = 4; c.seed = 7; c.prob = 0.85f;
+                const long long total = 600000;
+                StepSequencer a; setup(a, A, {{3, B}, {9, C}}, 0, true); a.setChainRepeat(0, 3); a.setChainRepeat(3, 2); a.setChainRepeat(9, 1);
+                auto all = run(a, c, bpm, sr, 512, total, false);
+                CHECK(samePos(onsBefore(all, total), onsBefore(expected(c, {{&A, 3}, {&B, 2}, {&C, 1}}, total), total)), "%s, loop 4: A x3, B x2, C x1 play exactly like fresh runs", cs.name);
+                CHECK(balancedEv(all), "%s: notes alternate", cs.name);
+            }
+            // block size does not matter
+            std::vector<Ev> ref; SeqSettings c = st; c.loopLen = 4; c.seed = 3; c.swing = 60.f;
+            for (int blk : {512, 64, 997, 4096})
+            {
+                StepSequencer a; setup(a, A, {{1, B}, {2, C}}, 0, true); a.setChainRepeat(0, 2); a.setChainRepeat(1, 2);
+                auto all = run(a, c, bpm, sr, blk, 300000, false);
+                if (ref.empty()) ref = all; else CHECK(sameEv(ref, all), "chain: same events at block size %d", blk);
+            }
+        }
+
+        // CHAIN off (the default): nothing ever moves; with only one slot filled, CHAIN on changes nothing either
+        {
+            SeqSettings c = st; c.seed = 5;
+            StepSequencer base; base.deserialize(A); auto br = run(base, c, bpm, sr, 512, 400000, false);
+            StepSequencer off; setup(off, A, {{1, B}}, 0, false); auto fr = run(off, c, bpm, sr, 512, 400000, false);
+            CHECK(sameEv(br, fr) && !off.switchPending() && off.chainLiveSlot() == 0, "CHAIN off: the live pattern just loops, whatever the bank holds");
+            StepSequencer one; setup(one, A, {}, 0, true); one.setChainRepeat(0, 2); auto orr = run(one, c, bpm, sr, 512, 400000, false);
+            CHECK(sameEv(br, orr) && !one.switchPending(), "CHAIN on with a single filled slot: it keeps looping, nothing is swapped");
+            // an empty live pattern does not run at all; the chain does nothing
+            StepSequencer emp; setup(emp, std::string(), {{1, B}}, 0, true); auto er = run(emp, c, bpm, sr, 512, 100000, false);
+            CHECK(er.empty() && !emp.switchPending(), "an empty live slot is silent and the chain does not start it");
+        }
+
+        // switched on in the middle of a pass: counting starts at the next pass start, so A (count 2) plays 3 passes in all
+        {
+            SeqSettings c = st; c.seed = 5;
+            StepSequencer a; setup(a, A, {{1, B}}, 0, false); a.setChainRepeat(0, 2); a.setChainRepeat(1, 1);
+            auto p1 = run(a, c, bpm, sr, 512, 13000, false); a.setChain(true);
+            auto p2 = run(a, c, bpm, sr, 512, 200000 - 13000, false);
+            auto all = cat(p1, p2, 13000);
+            auto ons = onsBefore(all, 200000);
+            // B starts after 3 passes of A = 18 steps
+            long long firstB = -1; for (auto& x : ons) if (x.note >= 72) { firstB = x.pos; break; }
+            CHECK(near(firstB, 18 * step), "CHAIN switched on inside A's first pass: A plays 3 passes in all, B starts at %lld (got %lld)", 18 * step, firstB);
+        }
+
+        // holdChain: no advance while the hold is on; it catches up at the next pass start after the release
+        {
+            SeqSettings c = st; c.seed = 5;
+            StepSequencer a; setup(a, A, {{1, B}}, 0, true); a.setChainRepeat(0, 1); a.setChainRepeat(1, 1);
+            a.holdChain(true);
+            auto p1 = run(a, c, bpm, sr, 512, 5 * 6 * step + 1000, false); // five whole passes and a bit
+            CHECK(!a.switchPending() && a.chainLiveSlot() == 0, "hold on: the chain does not advance, however many passes end");
+            bool anyB = false; for (auto& x : p1) if (x.on && x.note >= 72) anyB = true;
+            CHECK(!anyB, "...and only A is heard");
+            a.holdChain(false);
+            auto p2 = run(a, c, bpm, sr, 512, 40000, false);
+            long long firstB = -1; for (auto& x : p2) if (x.on && x.note >= 72) { firstB = x.pos; break; }
+            const long long expectAt = 6 * step * 6 - (5 * 6 * step + 1000); // the 6th pass start after the release
+            CHECK(near(firstB, expectAt), "hold released: B starts at the next pass start (%lld), got %lld", expectAt, firstB);
+        }
+
+        // a queued switch (AT LOOP END) wins over the chain at the same pass start, and the chain counts the new pattern from there
+        {
+            SeqSettings c = st; c.seed = 5;
+            const long long total = 600000;
+            StepSequencer a; setup(a, A, {{1, B}, {2, C}}, 0, true); a.setChainRepeat(0, 5); a.setChainRepeat(1, 2); a.setChainRepeat(2, 2);
+            auto p1 = run(a, c, bpm, sr, 512, 85000, false); // (inside A's third pass: two passes have been counted)
+            CHECK(a.queueSwitch(C, 2), "set-up: queue slot 3 (C) inside A's third pass");
+            auto p2 = run(a, c, bpm, sr, 512, total - 85000, false);
+            auto all = cat(p1, p2, 85000);
+            // A plays 3 passes (the third ends at 108000 and the queue wins), then C x2 (its own count, from zero), then the chain goes on from
+            // slot 3 to the next filled slot after it: A x5, B x2, C x2, ...
+            std::vector<Ev> want; long long at = 0;
+            auto add = [&](const std::string& pt, int passes) { StepSequencer f; f.deserialize(pt); auto r = run(f, c, bpm, sr, 512, passes * f.length() * step, false); for (auto& x : r) if (x.on) want.push_back({x.pos + at, true, x.note, 0}); at += passes * f.length() * step; };
+            add(A, 3); add(C, 2);
+            while (at < total) { add(A, 5); add(B, 2); add(C, 2); }
+            CHECK(samePos(onsBefore(all, total), onsBefore(want, total)), "queue + chain: A x3, the queued C x2 (counted from zero, not from A's count), then A x5, B x2, C x2, ...");
+        }
+
+        // CHAIN switched off and on again: the count starts over at the next pass start
+        {
+            SeqSettings c = st; c.seed = 5;
+            StepSequencer a; setup(a, A, {{1, B}}, 0, true); a.setChainRepeat(0, 2); a.setChainRepeat(1, 2);
+            auto p1 = run(a, c, bpm, sr, 512, 40000, false); a.setChain(false);
+            auto p2 = run(a, c, bpm, sr, 512, 40000, false); a.setChain(true);
+            auto p3 = run(a, c, bpm, sr, 512, 200000, false);
+            auto all = cat(cat(p1, p2, 40000), p3, 80000);
+            long long firstB = -1; for (auto& x : all) if (x.on && x.note >= 72) { firstB = x.pos; break; }
+            CHECK(near(firstB, 180000), "off for a pass and on again at 80000 (inside a pass): the count restarts at the next pass start (108000), so B comes in at 180000 (got %lld)", firstB);
+        }
+
+        // STEP 1 (RETRIG) and restart() (an immediate slot switch) start the pattern over, and the chain counts its passes from there
+        {
+            SeqSettings c = st; c.seed = 5;
+            StepSequencer a; setup(a, A, {{1, B}}, 0, true); a.setChainRepeat(0, 2); a.setChainRepeat(1, 2);
+            auto p1 = run(a, c, bpm, sr, 500, 40000, false); // one pass has ended (36000): the count is 1
+            a.requestStep1(); // acts at the next step start (42000)
+            auto p2 = run(a, c, bpm, sr, 500, 200000, false);
+            auto all = cat(p1, p2, 40000);
+            long long firstB = -1; for (auto& x : all) if (x.on && x.note >= 72) { firstB = x.pos; break; }
+            CHECK(near(firstB, 42000 + 2 * 6 * step), "STEP 1 at 42000: A plays 2 passes counted from there, B comes in at %lld (got %lld)", 42000 + 2 * 6 * step, firstB);
+            StepSequencer r; setup(r, A, {{1, B}}, 0, true); r.setChainRepeat(0, 2); r.setChainRepeat(1, 2);
+            auto q1 = run(r, c, bpm, sr, 500, 40000, false);
+            r.restart(); // what an immediate slot switch does
+            auto q2 = run(r, c, bpm, sr, 500, 200000, false);
+            auto all2 = cat(q1, q2, 40000);
+            long long firstB2 = -1; for (auto& x : all2) if (x.on && x.note >= 72) { firstB2 = x.pos; break; }
+            CHECK(near(firstB2, 40000 + 2 * 6 * step), "restart() at 40000: the pattern starts over and A plays 2 passes from there, B comes in at %lld (got %lld)", 40000 + 2 * 6 * step, firstB2);
+        }
+
+        // Logic sync: the same chain; and a Logic cycle (the host jumps back to the top every 4 beats) keeps the count, so every cycle is the same
+        {
+            SeqSettings c = st; c.loopLen = 4; c.seed = 3;
+            const long long cyc = 96000; // 4 beats
+            StepSequencer a; setup(a, A, {{1, B}}, 0, true); a.setChainRepeat(0, 2); a.setChainRepeat(1, 2);
+            auto e = run(a, c, bpm, sr, 500, 2 * cyc, true, 0.0, {{cyc, 0.0}});
+            auto c1 = onsBefore(e, cyc); std::vector<Ev> c2; for (auto& x : e) if (x.on && x.pos >= cyc) c2.push_back({x.pos - cyc, true, x.note, x.vel});
+            CHECK(!c1.empty() && samePos(c1, c2), "Logic sync, a 4-beat cycle that is 4 passes long (A x2, B x2): the second cycle is exactly like the first (the chain count survives the jump)");
+            CHECK(samePos(c1, onsBefore(expected(c, {{&A, 2}, {&B, 2}}, cyc), cyc)), "...and the first cycle is A x2 then B x2");
+            // the same chain in Free sync from step 1 is the same notes as Logic sync from bar 1
+            StepSequencer f; setup(f, A, {{1, B}}, 0, true); f.setChainRepeat(0, 2); f.setChainRepeat(1, 2);
+            auto fr = run(f, c, bpm, sr, 500, cyc, false);
+            CHECK(samePos(onsBefore(fr, cyc), c1), "Logic sync from the top of the bar plays the same chain as Free sync");
+        }
+
+        // fuzz: random settings, block sizes and events (bank changes, slot switches, CHAIN on / off, counts, STEP 1, queue, cancel, stop), both
+        // sync modes. Notes always alternate, nothing sounds after a stop, and the patterns are only ever moved between slots: after every
+        // collection the 16 slot texts are the same multiset as the model's
+        {
+            std::mt19937 rng(20261010);
+            auto rnd = [&](int n) { return (int) (rng() % (unsigned) n); };
+            auto randPat = [&]() { if (rnd(4) == 0) return std::string(); StepSequencer t; for (int i = 0, n = 1 + rnd(12); i < n; ++i) { if (rnd(5) == 0) t.addRest(); else t.recordNote(30 + rnd(50), 100); } return t.serialize(); };
+            int runs = 0, chainSwaps = 0, collects = 0;
+            for (int iter = 0; iter < 150; ++iter)
+            {
+                StepSequencer s;
+                std::vector<std::string> model(16); for (auto& m : model) m = randPat();
+                if (model[0].empty()) model[0] = pat({60, 62});
+                int cur = 0; s.deserialize(model[0]); { std::string tx[16]; for (int i = 0; i < 16; ++i) tx[i] = model[i]; s.setChainBank(tx, cur); }
+                for (int i = 0; i < 16; ++i) s.setChainRepeat(i, 1 + rnd(4));
+                s.setChain(rnd(4) != 0);
+                SeqSettings c = st; c.direction = rnd(4); c.pendRepeat = rnd(2); c.loopLen = rnd(7); c.division = rnd(8); c.swing = 50.f + rnd(26); c.seed = rnd(2) ? rnd(9) : 0;
+                c.gate = 0.1f + 0.1f * rnd(10); c.prob = 0.5f + 0.1f * rnd(6);
+                const bool follow = rnd(3) == 0;
+                std::vector<Ev> all; long long t = 0; double ppq = 0; bool stopped = false;
+                auto sortedAll = [](std::vector<std::string> v) { std::sort(v.begin(), v.end()); return v; };
+                // collect what the audio thread did: patterns must only have moved
+                auto collect = [&]() {
+                    std::string lv, tx[16]; int ns = cur;
+                    const bool sw = s.takeSwitchAll(&lv, tx, ns, false);
+                    if (sw)
+                    {
+                        std::vector<std::string> now(16); for (int i = 0; i < 16; ++i) now[i] = tx[i]; now[ns] = lv;
+                        CHECK(sortedAll(now) == sortedAll(model), "fuzz %d: after swaps the 16 patterns are the same set as before (nothing lost or duplicated)", iter);
+                        model = now; cur = ns; ++collects;
+                    }
+                    else CHECK(lv == model[cur], "fuzz %d: no swap reported, the live pattern is unchanged", iter);
+                    return sw;
+                };
+                for (int stepNo = 0; stepNo < 40; ++stepNo)
+                {
+                    const int blk = 1 + rnd(4000);
+                    switch (rnd(12))
+                    {
+                        case 0: // a change of the bank, the way the processor does it: hold, collect, change, push, release
+                        {
+                            s.holdChain(true); collect();
+                            const int j = rnd(16);
+                            if (j != cur) { model[j] = randPat(); s.replaceQueued(j, model[j]); }
+                            std::string tx[16]; for (int i = 0; i < 16; ++i) tx[i] = model[i]; s.setChainBank(tx, cur);
+                            s.holdChain(false); break;
+                        }
+                        case 1: // selecting a slot at once (selectPatternSlot)
+                        {
+                            s.holdChain(true); collect();
+                            const int j = rnd(16); std::string lv; { std::string tx[16]; int ns = cur; s.takeSwitchAll(&lv, tx, ns, true); }
+                            model[cur] = lv;
+                            if (j != cur) { cur = j; s.deserialize(model[j]); s.restart(); }
+                            std::string tx[16]; for (int i = 0; i < 16; ++i) tx[i] = model[i]; s.setChainBank(tx, cur);
+                            s.holdChain(false); break;
+                        }
+                        case 2: s.setChain(rnd(2) != 0); break;
+                        case 3: s.setChainRepeat(rnd(16), 1 + rnd(5)); break;
+                        case 4: s.requestStep1(); break;
+                        case 5: { s.holdChain(true); collect(); const int j = rnd(16); if (j != cur && s.queueSwitch(model[j], j)) {} s.holdChain(false); break; }
+                        case 6: s.cancelQueuedSwitch(); break;
+                        case 7: stopped = !stopped; break;
+                        default: break;
+                    }
+                    SeqSettings cc = c; if (stopped) cc.play = false;
+                    auto e = run(s, cc, bpm, sr, 512, blk, follow && !stopped, ppq);
+                    ppq += blk * (bpm / 60.0 / sr);
+                    all = cat(all, e, t); t += blk;
+                    if (s.switchPending()) { const int before = cur; collect(); if (cur != before) ++chainSwaps; }
+                }
+                ++runs;
+                int bal = 0; bool okAlt = true; for (auto& x : all) { bal += x.on ? 1 : -1; if (bal < 0 || bal > 1) okAlt = false; }
+                CHECK(okAlt, "chain fuzz run %d: notes alternate on / off", iter);
+                SeqSettings off = c; off.play = false; off.followHost = false; SeqEvent buf[16]; SeqHostInfo h; h.bpm = bpm;
+                const int nEv = s.process(sr, 512, h, off, buf, 16); for (int i = 0; i < nEv; ++i) bal += buf[i].on ? 1 : -1;
+                CHECK(bal == 0, "chain fuzz run %d: nothing is left sounding after a stop (balance %d)", iter, bal);
+            }
+            printf("  (fuzz: %d runs, %d collections, %d slot changes seen)\n", runs, collects, chainSwaps);
+            CHECK(collects > 100, "chain fuzz: swaps were actually exercised (%d)", collects);
+        }
     }
 
     printf(failures ? "FAIL (%d)\n" : "PASS\n", failures);
