@@ -18,7 +18,14 @@ juce::Font makeFont(float height, bool bold = false)
 
 // v0.15: six sequencer rows (EDIT, PLAY, DIRECTION, SCALE, LANE, PATTERN) made the window 36 px taller than v0.14 (840 x 898);
 // v0.16: a seventh row (CHAIN) makes it another 36 px taller
+#if WT8_MIDI_FX
+// the MIDI effect build has no sound knobs: the two knob rows (378 px) and the gap below them are gone
+constexpr int kWindowW = 840, kWindowH = 970 - 378 - 10;
+constexpr int kKnobRowsH = 0;
+#else
 constexpr int kWindowW = 840, kWindowH = 970;
+constexpr int kKnobRowsH = 378;
+#endif
 } // namespace
 
 // ---------------------------------------------------------------------------------------------
@@ -982,6 +989,15 @@ WT8Editor::WT8Editor(WT8AudioProcessor& p) : juce::AudioProcessorEditor(&p), pro
         refreshTableControls();
     };
     refreshTableControls();
+#if WT8_MIDI_FX
+    // MIDI effect build: only the sequencer is shown (the sound controls stay as parameters, but have no place here)
+    for (auto* grp : {&row1_, &row2_})
+        for (auto& g : *grp)
+            for (auto* k : g.knobs) { k->slider.setVisible(false); k->name.setVisible(false); }
+    for (juce::Component* c : std::initializer_list<juce::Component*>{&tableView_, &loadTableBtn_, &resetTableBtn_, &filterTypeBox_, &pitchShapeBox_, &filterShapeBox_,
+                                                                       &presetBox_, &presetPrevBtn_, &presetNextBtn_, &presetSaveBtn_, &presetFolderBtn_})
+        c->setVisible(false);
+#endif
     startTimerHz(15);
 }
 
@@ -1393,7 +1409,7 @@ void WT8Editor::paint(juce::Graphics& g)
     // header
     g.setColour(kText);
     g.setFont(makeFont(26.0f * scale, true));
-    g.drawText("ipmohc", juce::Rectangle<int>(int(20 * scale), 0, int(300 * scale), int(48 * scale)),
+    g.drawText(WT8_MIDI_FX ? "dotriaconta-tone" : "ipmohc", juce::Rectangle<int>(int(20 * scale), 0, int(300 * scale), int(48 * scale)),
                juce::Justification::centredLeft);
     g.setColour(kDim);
     g.setFont(makeFont(12.0f * scale));
@@ -1412,8 +1428,7 @@ void WT8Editor::paint(juce::Graphics& g)
         g.drawText(grp.title, grp.bounds.withTrimmedLeft(int(12 * scale)).withHeight(int(24 * scale)),
                    juce::Justification::centredLeft);
     };
-    for (auto& grp : row1_) drawGroup(grp);
-    for (auto& grp : row2_) drawGroup(grp);
+    if (!WT8_MIDI_FX) { for (auto& grp : row1_) drawGroup(grp); for (auto& grp : row2_) drawGroup(grp); }
     Group seqGroup; seqGroup.title = "SEQUENCER"; seqGroup.bounds = seqBounds_;
     drawGroup(seqGroup);
     g.setColour(kEdge.brighter(0.25f));
@@ -1428,7 +1443,7 @@ void WT8Editor::resized()
     const int headerH = int(48 * scale);
 
     auto full = getLocalBounds().withTrimmedTop(headerH).reduced(margin, 0);
-    auto area = full.removeFromTop(int(378 * scale)); // the two knob rows
+    auto area = full.removeFromTop(int(kKnobRowsH * scale)); // the two knob rows (none in the MIDI effect build)
     const int rowH = (area.getHeight() - gap) / 2;
 
     auto layoutRow = [&](std::vector<Group>& row, juce::Rectangle<int> r)
@@ -1466,11 +1481,13 @@ void WT8Editor::resized()
 
     auto row1 = area.removeFromTop(rowH);
     area.removeFromTop(gap);
+#if !WT8_MIDI_FX
     layoutRow(row1_, row1);
     layoutRow(row2_, area);
+#endif
 
     // v0.10: LOAD / RESET sit under the WAVETABLE knob (its slider gives up the space)
-    if (tableKnob_ != nullptr)
+    if (!WT8_MIDI_FX && tableKnob_ != nullptr)
     {
         auto b = tableKnob_->slider.getBounds();
         auto strip = b.removeFromBottom(int(26 * scale));
@@ -1483,7 +1500,7 @@ void WT8Editor::resized()
     }
 
     // v0.19: the filter TYPE box sits under CUTOFF / RESONANCE
-    if (filterKnobs_[0] != nullptr)
+    if (!WT8_MIDI_FX && filterKnobs_[0] != nullptr)
     {
         juce::Rectangle<int> strips[2];
         for (int n = 0; n < 2; ++n)
@@ -1496,7 +1513,7 @@ void WT8Editor::resized()
     }
 
     // v0.17: the LFO shape boxes sit under the knob pairs (the four knobs give up the bottom strip)
-    if (lfoKnobs_[0] != nullptr)
+    if (!WT8_MIDI_FX && lfoKnobs_[0] != nullptr)
     {
         juce::Rectangle<int> strips[4];
         for (int n = 0; n < 4; ++n)
@@ -1511,7 +1528,7 @@ void WT8Editor::resized()
     }
 
     // ---- sequencer strip ----
-    full.removeFromTop(gap);
+    if (!WT8_MIDI_FX) full.removeFromTop(gap);
     seqBounds_ = full.withTrimmedBottom(margin);
     auto inner = seqBounds_.withTrimmedTop(int(24 * scale)).reduced(int(8 * scale), int(4 * scale));
 

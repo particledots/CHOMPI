@@ -20,11 +20,12 @@ jobs:
           ./build/plugin_test
           ./build/rate_test wt8-plugin/wavetables
           ./build/seq_test
+          ./build/fx_test
       - name: Verify universal binary (arm64 + x86_64)
         run: |
           fail=0; n=0
           echo "::notice title=artefacts::$(find build/WT8_artefacts -maxdepth 4 -name 'ipmohc*' | tr '\n' ' ')"
-          for bin in $(find build/WT8_artefacts -path '*Contents/MacOS/ipmohc' -type f); do
+          for bin in $(find build/WT8_artefacts -path '*Contents/MacOS/ipmohc' -type f) $(find build/WT8Seq_artefacts -path '*Contents/MacOS/dotriaconta-tone' -type f); do
             n=$((n+1))
             archs=$(lipo -archs "$bin" 2>&1)
             echo "::notice title=lipo::$bin => $archs"
@@ -38,6 +39,8 @@ jobs:
           mkdir out
           cp -R build/WT8_artefacts/Release/AU/ipmohc.component out/
           cp -R build/WT8_artefacts/Release/VST3/ipmohc.vst3 out/ || true
+          cp -R build/WT8Seq_artefacts/Release/AU/dotriaconta-tone.component out/
+          cp -R build/WT8Seq_artefacts/Release/VST3/dotriaconta-tone.vst3 out/ || true
           cd out && zip -ry ../ipmohc-macos.zip .
       - uses: actions/upload-artifact@v4
         with: { name: ipmohc-macos, path: ipmohc-macos.zip }

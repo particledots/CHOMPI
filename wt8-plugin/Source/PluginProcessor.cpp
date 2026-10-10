@@ -112,7 +112,11 @@ juce::AudioProcessorValueTreeState::ParameterLayout WT8AudioProcessor::createLay
 }
 
 WT8AudioProcessor::WT8AudioProcessor()
+#if WT8_MIDI_FX
+    : AudioProcessor(BusesProperties()), // a MIDI effect: no audio buses
+#else
     : AudioProcessor(BusesProperties().withOutput("Output", juce::AudioChannelSet::stereo(), true)),
+#endif
       apvts(*this, nullptr, "WT8", createLayout())
 {
     for (auto& f : handoffFlag_) f.store(false);
@@ -122,6 +126,9 @@ WT8AudioProcessor::~WT8AudioProcessor() = default;
 
 bool WT8AudioProcessor::isBusesLayoutSupported(const BusesLayout& layouts) const
 {
+#if WT8_MIDI_FX
+    return layouts.getMainOutputChannelSet().isDisabled() && layouts.getMainInputChannelSet().isDisabled();
+#endif
     return layouts.getMainOutputChannelSet() == juce::AudioChannelSet::stereo()
            && layouts.getMainInputChannelSet().isDisabled();
 }
@@ -247,6 +254,10 @@ void WT8AudioProcessor::resetUserTable(int slot)
 void WT8AudioProcessor::prepareToPlay(double sampleRate, int)
 {
     sampleRate_ = sampleRate;
+#if WT8_MIDI_FX
+    seq_.resetTransport(); // a MIDI effect has no sound engine
+    return;
+#endif
     engineReady_ = false;
     auto fresh = std::make_unique<WT8Engine>(sampleRate);
     loadWavetables(*fresh);
@@ -264,9 +275,89 @@ void WT8AudioProcessor::prepareToPlay(double sampleRate, int)
     seq_.resetTransport();
 }
 
+int WT8AudioProcessor::runSequencer(int numSamples, bool& xposeOn)
+{
+    // Sequencer: ask it which notes start/stop in this block (timed from the host's tempo and position).
+    SeqHostInfo host;
+    if (auto* ph = getPlayHead())
+        if (auto pos = ph->getPosition())
+        {
+            host.hostPlaying = pos->getIsPlaying();
+            if (auto bpm = pos->getBpm()) host.bpm = *bpm;
+            if (auto ppq = pos->getPpqPosition()) { host.ppq = *ppq; host.havePpq = true; }
+        }
+    SeqSettings ss;
+    ss.play       = *apvts.getRawParameterValue("seq_play") > 0.5f;
+    ss.followHost = (int) *apvts.getRawParameterValue("seq_sync") == 1;
+    ss.division   = (int) *apvts.getRawParameterValue("seq_div");
+    ss.gate       = *apvts.getRawParameterValue("seq_gate");
+    ss.mute       = *apvts.getRawParameterValue("seq_mute") > 0.5f;
+    ss.recording  = seqRecording_.load();
+    ss.loopLen    = (int) *apvts.getRawParameterValue("seq_loop");
+    ss.direction  = (int) *apvts.getRawParameterValue("seq_dir");
+    ss.pendRepeat = *apvts.getRawParameterValue("seq_pendrep") > 0.5f;
+    ss.prob       = *apvts.getRawParameterValue("seq_prob");
+    ss.seed       = (int) *apvts.getRawParameterValue("seq_seed");
+    xposeOn = *apvts.getRawParameterValue("seq_xpose") > 0.5f;
+    ss.scale      = (int) *apvts.getRawParameterValue("seq_scale") - 1; // choice 0 = Off -> -1
+    ss.root       = (int) *apvts.getRawParameterValue("seq_root");
+    ss.transpose  = xposeOn ? seqTranspose_.load() : 0;                 // switched off = the pattern plays as recorded
+    ss.swing      = *apvts.getRawParameterValue("seq_swing");
+    ss.accent     = *apvts.getRawParameterValue("seq_accent");
+    ss.octMode    = (int) *apvts.getRawParameterValue("seq_octmode");
+    return seq_.process(sampleRate_, numSamples, host, ss, seqEvents_, kSeqEventCapacity);
+}
+
+#if WT8_MIDI_FX
+// The MIDI effect build: the same sequencer, no sound engine. The sequencer's notes go out as MIDI (channel 1) at their sample
+// offsets; the notes arriving from the keyboard pass through (REC and MIDI XPOSE work as in the synth build); every other MIDI
+// message passes through unchanged.
+void WT8AudioProcessor::processMidiFx(juce::MidiBuffer& midi, int numSamples)
+{
+    bool xposeOn = false;
+    const int numSeq = runSequencer(numSamples, xposeOn);
+    fxOut_.clear();
+    for (const auto meta : midi)
+    {
+        const auto m = meta.getMessage();
+        const int at = juce::jlimit(0, juce::jmax(0, numSamples - 1), meta.samplePosition);
+        if (m.isNoteOn())
+        {
+            const bool recording = seqRecording_.load();
+            if (xposeOn && !recording)
+            {
+                seqTranspose_.store(juce::jlimit(-127, 127, m.getNoteNumber() - 60)); // the key sets the transpose (C3 = 0)
+                if (!seq_.isRunning()) fxOut_.addEvent(m, at);                        // and only sounds when the pattern is not running
+            }
+            else
+            {
+                fxOut_.addEvent(m, at);
+                if (recording) seq_.recordNote(m.getNoteNumber(), juce::jmax(1, (int) m.getVelocity()));
+            }
+        }
+        else
+            fxOut_.addEvent(m, at);
+    }
+    for (int i = 0; i < numSeq; ++i)
+    {
+        const auto& e = seqEvents_[i];
+        const int at = juce::jlimit(0, juce::jmax(0, numSamples - 1), e.offset);
+        const int note = juce::jlimit(0, 127, e.note);
+        fxOut_.addEvent(e.on ? juce::MidiMessage::noteOn(1, note, (juce::uint8) juce::jlimit(1, 127, e.vel))
+                             : juce::MidiMessage::noteOff(1, note),
+                        at);
+    }
+    midi.swapWith(fxOut_);
+}
+#endif
+
 void WT8AudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
 {
     juce::ScopedNoDenormals noDenormals;
+#if WT8_MIDI_FX
+    processMidiFx(midi, buffer.getNumSamples());
+    return;
+#endif
     const int numSamples = buffer.getNumSamples();
     buffer.clear();
     if (!engineReady_ || buffer.getNumChannels() < 2)
@@ -305,35 +396,8 @@ void WT8AudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
     float* left = buffer.getWritePointer(0);
     float* right = buffer.getWritePointer(1);
 
-    // Sequencer: ask it which notes start/stop in this block (timed from the host's tempo and position).
-    SeqHostInfo host;
-    if (auto* ph = getPlayHead())
-        if (auto pos = ph->getPosition())
-        {
-            host.hostPlaying = pos->getIsPlaying();
-            if (auto bpm = pos->getBpm()) host.bpm = *bpm;
-            if (auto ppq = pos->getPpqPosition()) { host.ppq = *ppq; host.havePpq = true; }
-        }
-    SeqSettings ss;
-    ss.play       = *apvts.getRawParameterValue("seq_play") > 0.5f;
-    ss.followHost = (int) *apvts.getRawParameterValue("seq_sync") == 1;
-    ss.division   = (int) *apvts.getRawParameterValue("seq_div");
-    ss.gate       = *apvts.getRawParameterValue("seq_gate");
-    ss.mute       = *apvts.getRawParameterValue("seq_mute") > 0.5f;
-    ss.recording  = seqRecording_.load();
-    ss.loopLen    = (int) *apvts.getRawParameterValue("seq_loop");
-    ss.direction  = (int) *apvts.getRawParameterValue("seq_dir");
-    ss.pendRepeat = *apvts.getRawParameterValue("seq_pendrep") > 0.5f;
-    ss.prob       = *apvts.getRawParameterValue("seq_prob");
-    ss.seed       = (int) *apvts.getRawParameterValue("seq_seed");
-    const bool xposeOn = *apvts.getRawParameterValue("seq_xpose") > 0.5f;
-    ss.scale      = (int) *apvts.getRawParameterValue("seq_scale") - 1; // choice 0 = Off -> -1
-    ss.root       = (int) *apvts.getRawParameterValue("seq_root");
-    ss.transpose  = xposeOn ? seqTranspose_.load() : 0;                 // switched off = the pattern plays as recorded
-    ss.swing      = *apvts.getRawParameterValue("seq_swing");
-    ss.accent     = *apvts.getRawParameterValue("seq_accent");
-    ss.octMode    = (int) *apvts.getRawParameterValue("seq_octmode");
-    const int numSeq = seq_.process(sampleRate_, numSamples, host, ss, seqEvents_, kSeqEventCapacity);
+    bool xposeOn = false;
+    const int numSeq = runSequencer(numSamples, xposeOn);
 
     // Render in segments so every note starts at its sample-accurate position (MIDI + sequencer merged).
     int pos = 0;

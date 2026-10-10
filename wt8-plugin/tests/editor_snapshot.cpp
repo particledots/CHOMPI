@@ -70,7 +70,7 @@ int main(int argc, char** argv)
     if (argc > 15 && juce::String(argv[15]).startsWithIgnoreCase("uiview")) proc.setUiView(juce::String(argv[15]).substring(6).getIntValue()); // v0.18: the saved view the editor should open in
     std::unique_ptr<juce::AudioProcessorEditor> ed(proc.createEditor());
     const int w = argc > 2 ? std::atoi(argv[2]) : 840;
-    ed->setSize(w, int(w * 970.0 / 840.0)); // v0.16: 840 x 970 (v0.15: 840 x 934; v0.9-v0.14: 840 x 898)
+    ed->setSize(w, int(w * (WT8_MIDI_FX ? 582.0 : 970.0) / 840.0)); // v0.16: 840 x 970 (v0.15: 840 x 934; v0.9-v0.14: 840 x 898)
     if (argc > 3)
         for (auto* c : ed->getChildren())
             if (auto* b = dynamic_cast<juce::TextButton*>(c))

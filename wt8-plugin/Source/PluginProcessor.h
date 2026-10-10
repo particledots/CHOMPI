@@ -7,6 +7,10 @@
 #include <vector>
 #include "StepSequencer.h"
 
+#ifndef WT8_MIDI_FX
+#define WT8_MIDI_FX 0
+#endif
+
 class WT8Engine;
 
 class WT8AudioProcessor : public juce::AudioProcessor
@@ -23,11 +27,17 @@ class WT8AudioProcessor : public juce::AudioProcessor
     juce::AudioProcessorEditor* createEditor() override;
     bool hasEditor() const override { return true; }
 
-    const juce::String getName() const override { return "ipmohc"; }
+    const juce::String getName() const override { return WT8_MIDI_FX ? "dotriaconta-tone" : "ipmohc"; }
     bool acceptsMidi() const override { return true; }
+#if WT8_MIDI_FX
+    bool producesMidi() const override { return true; }
+    bool isMidiEffect() const override { return true; }
+    double getTailLengthSeconds() const override { return 0.0; }
+#else
     bool producesMidi() const override { return false; }
     bool isMidiEffect() const override { return false; }
     double getTailLengthSeconds() const override { return 4.0; }
+#endif
 
     int getNumPrograms() override { return 1; }
     int getCurrentProgram() override { return 0; }
@@ -191,6 +201,11 @@ class WT8AudioProcessor : public juce::AudioProcessor
     // in one block, see seq_test T27). An event that did not fit would be a lost note-off, i.e. a stuck note.
     static constexpr int kSeqEventCapacity = 2048;
     SeqEvent seqEvents_[kSeqEventCapacity];
+    int runSequencer(int numSamples, bool& xposeOn); // reads the host position and the sequencer parameters, returns the number of events in seqEvents_
+#if WT8_MIDI_FX
+    void processMidiFx(juce::MidiBuffer& midi, int numSamples);
+    juce::MidiBuffer fxOut_;
+#endif
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(WT8AudioProcessor)
 };

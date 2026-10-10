@@ -87,6 +87,39 @@ target_link_libraries(WT8 PRIVATE WT8Data wt8_engine
   juce::juce_audio_utils juce::juce_audio_processors
   PUBLIC juce::juce_recommended_config_flags juce::juce_recommended_lto_flags juce::juce_recommended_warning_flags)
 
+# ---------------------------------------------------------------------------
+# v0.22 draft: "dotriaconta-tone", the sequencer as a MIDI effect (AU type aumi). Same sources, compiled with WT8_MIDI_FX=1:
+# no sound engine, no audio buses, the sequencer's notes leave as MIDI.
+# ---------------------------------------------------------------------------
+if(APPLE)
+  set(WT8SEQ_FORMATS AU VST3)
+else()
+  set(WT8SEQ_FORMATS VST3)
+endif()
+juce_add_plugin(WT8Seq
+  COMPANY_NAME "particledots"
+  PLUGIN_MANUFACTURER_CODE Ptdt
+  PLUGIN_CODE Ipsq
+  FORMATS ${WT8SEQ_FORMATS}
+  PRODUCT_NAME "dotriaconta-tone"
+  IS_SYNTH FALSE
+  IS_MIDI_EFFECT TRUE
+  NEEDS_MIDI_INPUT TRUE
+  NEEDS_MIDI_OUTPUT TRUE
+  AU_MAIN_TYPE kAudioUnitType_MIDIProcessor
+  COPY_PLUGIN_AFTER_BUILD ${WT8_COPY})
+target_sources(WT8Seq PRIVATE Source/PluginProcessor.cpp Source/PluginProcessor.h Source/PluginEditor.cpp Source/PluginEditor.h)
+target_compile_definitions(WT8Seq PUBLIC JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0 WT8_MIDI_FX=1)
+target_link_libraries(WT8Seq PRIVATE WT8Data wt8_engine
+  juce::juce_audio_utils juce::juce_audio_processors
+  PUBLIC juce::juce_recommended_config_flags juce::juce_recommended_lto_flags juce::juce_recommended_warning_flags)
+
+# Headless test of the MIDI effect build (drives the real processor: MIDI in, MIDI out)
+add_executable(fx_test tests/fx_test.cpp Source/PluginProcessor.cpp Source/PluginEditor.cpp)
+target_include_directories(fx_test PRIVATE Source)
+target_compile_definitions(fx_test PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 WT8_MIDI_FX=1)
+target_link_libraries(fx_test PRIVATE WT8Data wt8_engine juce::juce_audio_processors juce::juce_recommended_config_flags)
+
 # Headless test that drives the actual plugin object (processBlock, MIDI, state)
 add_executable(plugin_test tests/plugin_test.cpp Source/PluginProcessor.cpp Source/PluginEditor.cpp)
 target_include_directories(plugin_test PRIVATE Source)
@@ -100,4 +133,8 @@ if(WT8_EDITOR_SNAPSHOT)
   target_include_directories(editor_snapshot PRIVATE Source)
   target_compile_definitions(editor_snapshot PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0)
   target_link_libraries(editor_snapshot PRIVATE WT8Data wt8_engine juce::juce_audio_utils juce::juce_audio_processors juce::juce_recommended_config_flags)
+  add_executable(editor_snapshot_fx tests/editor_snapshot.cpp Source/PluginProcessor.cpp Source/PluginEditor.cpp)
+  target_include_directories(editor_snapshot_fx PRIVATE Source)
+  target_compile_definitions(editor_snapshot_fx PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 WT8_MIDI_FX=1)
+  target_link_libraries(editor_snapshot_fx PRIVATE WT8Data wt8_engine juce::juce_audio_utils juce::juce_audio_processors juce::juce_recommended_config_flags)
 endif()
