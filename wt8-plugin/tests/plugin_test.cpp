@@ -1,7 +1,9 @@
 // Drives the real WT8 AudioProcessor the way a host would (no GUI, no audio device).
 #include "PluginProcessor.h"
 #include "WavetableImport.h"
+#include "filter_golden.h"
 #include <cstring>
+#include <cstdlib>
 #include <limits>
 #include <cstdio>
 #include <cmath>
@@ -27,6 +29,37 @@ int main()
     const double sr = 44100.0; const int bs = 512;
     proc.setPlayConfigDetails(0, 2, sr, bs);
     proc.prepareToPlay(sr, bs);
+
+    // The golden scenario: the sound path as it was in v0.18 (filter with LFO, resonance, a cutoff move, two notes, a pitch LFO), only
+    // parameters that existed then. Returns every 97th left sample.
+    auto goldenScenario = [&]() {
+        auto pr = std::make_unique<WT8AudioProcessor>(); pr->setPlayConfigDetails(0, 2, sr, bs); pr->prepareToPlay(sr, bs);
+        auto setN = [&](const char* id, float real) { auto* q = pr->apvts.getParameter(id); q->setValueNotifyingHost(q->convertTo0to1(real)); };
+        setN("cutoff", 0.3f); setN("resonance", 0.8f); setN("filterlfodepth", 0.5f); setN("filterlforate", 0.5f);
+        setN("pitchlfodepth", 0.3f); setN("pitchlforate", 0.4f); setN("attack", 0.1f); setN("release", 0.2f);
+        juce::AudioBuffer<float> b(2, bs); juce::MidiBuffer m, none;
+        m.addEvent(juce::MidiMessage::noteOn(1, 48, (juce::uint8) 100), 0);
+        m.addEvent(juce::MidiMessage::noteOn(1, 64, (juce::uint8) 64), 100);
+        m.addEvent(juce::MidiMessage::noteOn(1, 79, (juce::uint8) 127), 200);
+        std::vector<float> out; long n = 0;
+        for (int blk = 0; blk < 360; ++blk)
+        {
+            if (blk == 120) setN("cutoff", 0.7f);
+            if (blk == 200) setN("cutoff", 0.1f);
+            if (blk == 280) m.addEvent(juce::MidiMessage::noteOff(1, 64), 0);
+            b.clear(); pr->processBlock(b, blk == 0 || blk == 280 ? m : none);
+            for (int i = 0; i < bs; ++i, ++n) if (n % 97 == 0) out.push_back(b.getSample(0, i));
+        }
+        return out;
+    };
+    if (std::getenv("WT8_DUMP_GOLDEN"))
+    {
+        const auto g = goldenScenario();
+        printf("// %d values\n#pragma once\nstatic const float kFilterGolden[] = {", (int) g.size());
+        for (size_t i = 0; i < g.size(); ++i) printf("%s%.9ef", i % 6 == 0 ? "\n    " : " ", g[i]), printf(i + 1 < g.size() ? "," : "");
+        printf("\n};\nstatic const int kFilterGoldenCount = %d;\n", (int) g.size());
+        return 0;
+    }
 
     juce::AudioBuffer<float> buf(2, bs);
     float peak = 0, held = 0, tail = 0;
@@ -1725,7 +1758,128 @@ int main()
         printf("v0.18 step view: %s\n", v18Ok ? "ok" : "FAILED");
     }
 
-    bool ok = seqOk && v4Ok && v5Ok && v6Ok && v8Ok && v9Ok && v10Ok && v13Ok && v14Ok && v16Ok && v17Ok && v18Ok && finite && peak > 0.02f && peak <= 1.5f && held > 0.005f && tail < held * 0.05f && std::fabs(cutoff - 0.2f) < 0.01f;
+    // ---- v0.19: filter type, key tracking and velocity to cutoff ----
+    bool v19Ok = true;
+    {
+        auto check = [&](bool cond, const char* what) { printf("  %s: %s\n", cond ? "ok  " : "FAIL", what); v19Ok = v19Ok && cond; };
+        const auto now = goldenScenario();
+        float worst = 0.f; double refEnergy = 0;
+        for (int i = 0; i < kFilterGoldenCount && i < (int) now.size(); ++i) { worst = std::fmax(worst, std::fabs(now[i] - kFilterGolden[i])); refEnergy += kFilterGolden[i] * kFilterGolden[i]; }
+        printf("  (golden: %zu samples now vs %d recorded from v0.18, largest difference %.3g, reference energy %.3g)\n", now.size(), kFilterGoldenCount, (double) worst, refEnergy);
+        check((int) now.size() == kFilterGoldenCount && kFilterGoldenCount > 1000 && refEnergy > 1.0, "the reference recording exists and is audible");
+        check(worst < 2e-4f, "with the filter type on DJ and KEY / VEL at 0 the sound matches what v0.18 produced (filter LFO, resonance, cutoff moves, pitch LFO)");
+        // ---- the new controls ----
+        auto makeProc = [&]() { auto pr = std::make_unique<WT8AudioProcessor>(); pr->setPlayConfigDetails(0, 2, sr, bs); pr->prepareToPlay(sr, bs); return pr; };
+        auto setN = [&](WT8AudioProcessor& pr, const char* id, float real) { auto* q = pr.apvts.getParameter(id); q->setValueNotifyingHost(q->convertTo0to1(real)); };
+        struct Out { std::vector<float> v; bool fin = true; float pk = 0; float rms = 0; float bright = 0; };
+        // one held note, 300 blocks; the last 200 are measured. bright = energy of the first difference / energy (a crude "how much treble")
+        auto render = [&](int type, float cutoff, float res, float key, float vel, int note, int velocity, float lfoDepth = 0.f) {
+            auto pr = makeProc();
+            setN(*pr, "filtertype", (float) type); setN(*pr, "cutoff", cutoff); setN(*pr, "resonance", res);
+            setN(*pr, "filterkey", key); setN(*pr, "filtervel", vel);
+            setN(*pr, "filterlfodepth", lfoDepth); setN(*pr, "filterlforate", 0.6f);
+            juce::AudioBuffer<float> b(2, bs); juce::MidiBuffer m, none; m.addEvent(juce::MidiMessage::noteOn(1, note, (juce::uint8) velocity), 0);
+            Out o; double e = 0, d = 0; float prev = 0;
+            for (int blk = 0; blk < 300; ++blk)
+            {
+                b.clear(); pr->processBlock(b, blk == 0 ? m : none);
+                for (int i = 0; i < bs; ++i)
+                {
+                    const float x = b.getSample(0, i);
+                    if (!std::isfinite(x)) o.fin = false;
+                    o.pk = std::fmax(o.pk, std::fabs(x));
+                    if (blk >= 100) { o.v.push_back(x); e += x * x; d += (x - prev) * (x - prev); }
+                    prev = x;
+                }
+            }
+            o.rms = (float) std::sqrt(e / std::fmax(1.0, (double) o.v.size())); o.bright = (float) (d / std::fmax(1e-12, e));
+            return o;
+        };
+        auto diffOf = [](const Out& a, const Out& c) { float d = 0; for (size_t i = 0; i < a.v.size() && i < c.v.size(); ++i) d = std::fmax(d, std::fabs(a.v[i] - c.v[i])); return d; };
+
+        auto* tp = dynamic_cast<juce::AudioParameterChoice*>(makeProc()->apvts.getParameter("filtertype"));
+        { auto keep = makeProc(); tp = dynamic_cast<juce::AudioParameterChoice*>(keep->apvts.getParameter("filtertype"));
+          check(tp != nullptr && tp->choices.size() == 4 && tp->choices[0] == "DJ", "filter type: 4 choices, the first is DJ");
+          check(*keep->apvts.getRawParameterValue("filtertype") == 0.f && *keep->apvts.getRawParameterValue("filterkey") == 0.f && *keep->apvts.getRawParameterValue("filtervel") == 0.f, "defaults: DJ, KEY 0, VEL 0"); }
+
+        const Out dj = render(0, 0.3f, 0.5f, 0, 0, 57, 100);
+        const Out lp = render(1, 0.3f, 0.5f, 0, 0, 57, 100);
+        const Out hp = render(2, 0.3f, 0.5f, 0, 0, 57, 100);
+        const Out bp = render(3, 0.3f, 0.5f, 0, 0, 57, 100);
+        check(lp.fin && hp.fin && bp.fin && lp.pk > 0.001f && hp.pk > 0.001f && bp.pk > 0.001f && lp.pk < 4.f && hp.pk < 4.f && bp.pk < 4.f, "low-pass, high-pass and band-pass: finite, audible, bounded");
+        check(diffOf(lp, dj) > 0.001f && diffOf(hp, dj) > 0.001f && diffOf(bp, dj) > 0.001f && diffOf(lp, hp) > 0.001f && diffOf(lp, bp) > 0.001f && diffOf(hp, bp) > 0.001f, "the four types sound different from each other");
+        check(lp.bright < hp.bright, "low-pass has less treble than high-pass at the same cutoff");
+        const Out lpLo = render(1, 0.15f, 0.2f, 0, 0, 57, 100), lpHi = render(1, 0.85f, 0.2f, 0, 0, 57, 100);
+        check(lpLo.bright < lpHi.bright, "low-pass: raising the cutoff brightens it");
+        const Out hpLo = render(2, 0.15f, 0.2f, 0, 0, 57, 100), hpHi = render(2, 0.85f, 0.2f, 0, 0, 57, 100);
+        check(hpLo.bright > hpHi.bright || hpLo.rms > hpHi.rms, "high-pass: raising the cutoff takes more of the low end away");
+        printf("  (treble measure: DJ %.3f LP %.3f HP %.3f BP %.3f | LP cutoff .15 %.3f .85 %.3f | HP rms .15 %.3f .85 %.3f)\n", (double) dj.bright, (double) lp.bright, (double) hp.bright, (double) bp.bright, (double) lpLo.bright, (double) lpHi.bright, (double) hpLo.rms, (double) hpHi.rms);
+
+        // key tracking: a note above C3 opens the filter, one below closes it (low-pass, so loudness shows it); 0 = no change
+        const Out k0hi = render(1, 0.3f, 0.2f, 0, 0, 84, 100), k1hi = render(1, 0.3f, 0.2f, 1, 0, 84, 100);
+        const Out k0lo = render(1, 0.3f, 0.2f, 0, 0, 36, 100), k1lo = render(1, 0.3f, 0.2f, 1, 0, 36, 100);
+        const Out k0c3 = render(1, 0.3f, 0.2f, 0, 0, 60, 100), k1c3 = render(1, 0.3f, 0.2f, 1, 0, 60, 100);
+        printf("  (key tracking rms: C6 %.4f -> %.4f, C1 %.4f -> %.4f, C3 %.4f -> %.4f)\n", (double) k0hi.rms, (double) k1hi.rms, (double) k0lo.rms, (double) k1lo.rms, (double) k0c3.rms, (double) k1c3.rms);
+        check(k1hi.rms > k0hi.rms * 1.1f, "KEY 100 %: a high note passes more through a low-pass than with KEY 0");
+        check(k1lo.rms < k0lo.rms * 0.9f, "KEY 100 %: a low note passes less");
+        check(std::fabs(k1c3.rms - k0c3.rms) < 0.02f * k0c3.rms + 1e-6f, "KEY at the reference note (C3) changes nothing");
+        // in the DJ filter with the cutoff in the middle (the filter is open) key tracking must not close or open anything
+        const Out djOpen0 = render(0, 0.5f, 0.2f, 0, 0, 84, 100), djOpen1 = render(0, 0.5f, 0.2f, 1, 0, 84, 100);
+        check(std::fabs(djOpen1.rms - djOpen0.rms) < 0.02f * djOpen0.rms + 1e-6f, "DJ filter with the cutoff in the middle (open): KEY changes nothing audible");
+        const Out djLp0 = render(0, 0.3f, 0.2f, 0, 0, 84, 100), djLp1 = render(0, 0.3f, 0.2f, 1, 0, 84, 100);
+        check(djLp1.rms > djLp0.rms * 1.05f, "DJ filter below the middle: KEY opens it for a high note");
+
+        // velocity to cutoff: a soft note gets darker, full velocity is untouched
+        const Out v0soft = render(1, 0.4f, 0.2f, 0, 0, 57, 40), v1soft = render(1, 0.4f, 0.2f, 0, 1, 57, 40);
+        const Out v0full = render(1, 0.4f, 0.2f, 0, 0, 57, 127), v1full = render(1, 0.4f, 0.2f, 0, 1, 57, 127);
+        printf("  (velocity: vel 40 rms %.4f -> %.4f, vel 127 rms %.4f -> %.4f)\n", (double) v0soft.rms, (double) v1soft.rms, (double) v0full.rms, (double) v1full.rms);
+        check(v1soft.rms < v0soft.rms * 0.9f, "VEL 100 %: a soft note passes less than with VEL 0");
+        check(diffOf(v0full, v1full) == 0.f, "VEL 100 %: a full-velocity note is bit-identical to VEL 0");
+        check(v1soft.bright < v0soft.bright, "VEL 100 %: a soft note is darker (less treble)");
+
+        // limits: top resonance, full LFO, every type, whole cutoff range, KEY and VEL up: nothing blows up
+        bool stable = true; float worstPk = 0;
+        for (int type = 0; type <= 3; ++type)
+            for (float cutoff : {0.f, 0.1f, 0.3f, 0.5f, 0.7f, 0.9f, 1.f})
+                for (float res : {0.f, 1.f})
+                {
+                    const Out o = render(type, cutoff, res, 1.f, 1.f, type % 2 ? 96 : 24, 20, 1.f);
+                    if (!o.fin || o.pk > 6.f) { stable = false; printf("    unstable: type %d cutoff %.1f res %.1f peak %.3g finite %d\n", type, (double) cutoff, (double) res, (double) o.pk, (int) o.fin); }
+                    worstPk = std::fmax(worstPk, o.pk);
+                }
+        printf("  (stability sweep: largest peak %.3f)\n", (double) worstPk);
+        check(stable, "stability: all types x cutoff 0..1 x resonance 0 and 1 x KEY / VEL 100 % x full filter LFO stay finite and bounded");
+        // changing type / KEY / VEL while notes sound
+        {
+            auto pr = makeProc(); setN(*pr, "filterlfodepth", 1.f);
+            juce::AudioBuffer<float> b(2, bs); juce::MidiBuffer m, none; m.addEvent(juce::MidiMessage::noteOn(1, 60, (juce::uint8) 100), 0); m.addEvent(juce::MidiMessage::noteOn(1, 79, (juce::uint8) 30), 10);
+            bool fin = true;
+            for (int blk = 0; blk < 400; ++blk)
+            {
+                if (blk % 5 == 0) { setN(*pr, "filtertype", (float) (blk / 5 % 4)); setN(*pr, "filterkey", (blk / 5 % 3) * 0.5f); setN(*pr, "filtervel", (blk / 5 % 2) * 1.f); setN(*pr, "cutoff", (blk / 5 % 7) / 6.f); }
+                b.clear(); pr->processBlock(b, blk == 0 ? m : none);
+                for (int i = 0; i < bs; ++i) if (!std::isfinite(b.getSample(0, i)) || std::fabs(b.getSample(0, i)) > 8.f) fin = false;
+            }
+            check(fin, "switching type, KEY, VEL and cutoff every few blocks while notes sound stays finite and bounded");
+        }
+        // saved with the project; an older project has DJ / 0 / 0
+        {
+            auto src = makeProc(); setN(*src, "filtertype", 3.f); setN(*src, "filterkey", 0.75f); setN(*src, "filtervel", 0.5f);
+            juce::MemoryBlock saved; src->getStateInformation(saved);
+            auto dst = makeProc(); dst->setStateInformation(saved.getData(), (int) saved.getSize());
+            check(*dst->apvts.getRawParameterValue("filtertype") == 3.f && std::fabs(*dst->apvts.getRawParameterValue("filterkey") - 0.75f) < 1e-4f && std::fabs(*dst->apvts.getRawParameterValue("filtervel") - 0.5f) < 1e-4f, "type, KEY and VEL are saved with the project");
+            auto xml = juce::AudioProcessor::getXmlFromBinary(saved.getData(), (int) saved.getSize());
+            for (auto* id : {"filtertype", "filterkey", "filtervel"})
+                while (auto* ch = xml->getChildByAttribute("id", id)) xml->removeChildElement(ch, true);
+            juce::MemoryBlock oldState; juce::AudioProcessor::copyXmlToBinary(*xml, oldState);
+            auto target = makeProc(); setN(*target, "filtertype", 2.f); setN(*target, "filterkey", 1.f); setN(*target, "filtervel", 1.f);
+            target->setStateInformation(oldState.getData(), (int) oldState.getSize());
+            check(*target->apvts.getRawParameterValue("filtertype") == 0.f && *target->apvts.getRawParameterValue("filterkey") == 0.f && *target->apvts.getRawParameterValue("filtervel") == 0.f, "a project from before v0.19: DJ, KEY 0, VEL 0");
+        }
+        printf("v0.19 filter: %s\n", v19Ok ? "ok" : "FAILED");
+    }
+
+    bool ok = seqOk && v4Ok && v5Ok && v6Ok && v8Ok && v9Ok && v10Ok && v13Ok && v14Ok && v16Ok && v17Ok && v18Ok && v19Ok && finite && peak > 0.02f && peak <= 1.5f && held > 0.005f && tail < held * 0.05f && std::fabs(cutoff - 0.2f) < 0.01f;
     printf(ok ? "PASS\n" : "FAIL\n");
     return ok ? 0 : 1;
 }

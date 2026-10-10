@@ -84,6 +84,9 @@ struct WT8Engine::Impl
         if (changed(p.filterLfoRate, applied.filterLfoRate)) engine->setLfoRate(p.filterLfoRate);
         if (changed(p.pitchLfoShape, applied.pitchLfoShape))   engine->setPitchLfoShape(p.pitchLfoShape);
         if (changed(p.filterLfoShape, applied.filterLfoShape)) engine->setFilterLfoShape(p.filterLfoShape);
+        if (changed(p.filterType, applied.filterType))         engine->setFilterType(p.filterType);
+        if (changed(p.filterKey, applied.filterKey))           engine->setFilterKeyTrack(p.filterKey);
+        if (changed(p.filterVel, applied.filterVel))           engine->setFilterVelocity(p.filterVel);
         if (changed(p.gain, applied.gain))                   engine->setGain(p.gain);
         if (changed(p.pan, applied.pan))                     engine->setPan(p.pan);
         if (changed(p.comp, applied.comp))                   engine->setFinalComp(p.comp);

@@ -99,6 +99,11 @@ juce::AudioProcessorValueTreeState::ParameterLayout WT8AudioProcessor::createLay
     const juce::StringArray lfoShapes{"Triangle", "Sine", "Saw down", "Saw up", "Square"};
     l.add(c("pitchlfoshape", "Pitch LFO Shape", lfoShapes, 0, 5));
     l.add(c("filterlfoshape", "Filter LFO Shape", lfoShapes, 0, 5));
+
+    // v0.19 filter additions. Version hint 6: added after v0.17 shipped. Defaults (DJ, 0, 0) = the filter as it always was.
+    l.add(c("filtertype", "Filter Type", juce::StringArray{"DJ", "Low-pass", "High-pass", "Band-pass"}, 0, 6));
+    l.add(f("filterkey", "Filter Key Tracking", 0.f, 1.f, 0.f, 6));
+    l.add(f("filtervel", "Filter Velocity", 0.f, 1.f, 0.f, 6));
     return l;
 }
 
@@ -282,6 +287,9 @@ void WT8AudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
     p.filterLfoRate  = *apvts.getRawParameterValue("filterlforate");
     p.pitchLfoShape  = (int) *apvts.getRawParameterValue("pitchlfoshape");
     p.filterLfoShape = (int) *apvts.getRawParameterValue("filterlfoshape");
+    p.filterType     = (int) *apvts.getRawParameterValue("filtertype");
+    p.filterKey      = *apvts.getRawParameterValue("filterkey");
+    p.filterVel      = *apvts.getRawParameterValue("filtervel");
     p.gain           = *apvts.getRawParameterValue("gain");
     p.pan            = *apvts.getRawParameterValue("pan");
     p.comp           = *apvts.getRawParameterValue("comp");

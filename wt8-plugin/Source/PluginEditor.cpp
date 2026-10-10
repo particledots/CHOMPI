@@ -753,6 +753,9 @@ WT8Editor::WT8Editor(WT8AudioProcessor& p) : juce::AudioProcessorEditor(&p), pro
     auto& flfoD   = addKnob("filterlfodepth", "FILTER DEPTH", Kind::Percent);
     auto& flfoR   = addKnob("filterlforate",  "FILTER RATE",  Kind::Percent);
 
+    auto& fkey    = addKnob("filterkey", "KEY", Kind::Percent); // v0.19
+    auto& fvel    = addKnob("filtervel", "VEL", Kind::Percent);
+
     auto& fx      = addKnob("fx",     "DELAY / REVERB", Kind::Percent);
     auto& fxTime  = addKnob("fxtime", "TIME",           Kind::Percent);
     auto& comp    = addKnob("comp",   "COMP / SAT",     Kind::Percent);
@@ -761,11 +764,13 @@ WT8Editor::WT8Editor(WT8AudioProcessor& p) : juce::AudioProcessorEditor(&p), pro
     auto& pan     = addKnob("pan",    "PAN",   Kind::Pan, true);
     auto& boost   = addKnob("output", "BOOST", Kind::Decibels, true);
 
+    filterKnobs_[0] = &cutoff; filterKnobs_[1] = &reso;
     lfoKnobs_[0] = &plfoD; lfoKnobs_[1] = &plfoR; lfoKnobs_[2] = &flfoD; lfoKnobs_[3] = &flfoR;
     row1_.push_back({"OSCILLATOR", {&table, &frame, &octave, &pitch}, {}, 2});
     row1_.push_back({"ENVELOPE",   {&attack, &release}, {}});
     row1_.push_back({"FILTER",     {&cutoff, &reso}, {}});
     row2_.push_back({"LFO",        {&plfoD, &plfoR, &flfoD, &flfoR}, {}});
+    row2_.push_back({"FILTER MOD", {&fkey, &fvel}, {}});
     row2_.push_back({"EFFECTS",    {&fx, &fxTime, &comp}, {}});
     row2_.push_back({"OUTPUT",     {&gain, &pan, &boost}, {}});
 
@@ -809,6 +814,8 @@ WT8Editor::WT8Editor(WT8AudioProcessor& p) : juce::AudioProcessorEditor(&p), pro
     fillCombo(scaleBox_, "seq_scale");
     fillCombo(rootBox_, "seq_root");
     fillCombo(octBox_, "seq_octmode");
+    fillCombo(filterTypeBox_, "filtertype");
+    filterTypeAtt_ = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(proc_.apvts, "filtertype", filterTypeBox_);
     fillCombo(pitchShapeBox_, "pitchlfoshape");
     fillCombo(filterShapeBox_, "filterlfoshape");
     pitchShapeAtt_ = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(proc_.apvts, "pitchlfoshape", pitchShapeBox_);
@@ -1446,7 +1453,7 @@ void WT8Editor::resized()
                 auto cell = inner.withX(inner.getX() + (int) j * cellW).withWidth(cellW);
                 const int labelH = int(16 * scale);
                 grp.knobs[j]->name.setBounds(cell.removeFromTop(labelH));
-                grp.knobs[j]->name.getProperties().set("fontHeight", 11.0f * scale);
+                grp.knobs[j]->name.getProperties().set("fontHeight", (cellW < int(72 * scale) ? 9.5f : 11.0f) * scale); // v0.19: the narrower cells of the 4-group row get a slightly smaller label
                 const int textH = int(18 * scale);
                 grp.knobs[j]->slider.setTextBoxStyle(juce::Slider::TextBoxBelow, false, juce::jmax(48, int(cellW * 0.9f)), textH);
                 grp.knobs[j]->slider.setBounds(cell);
@@ -1470,6 +1477,19 @@ void WT8Editor::resized()
         loadTableBtn_.setBounds(strip.removeFromLeft(bw).reduced(0, int(1 * scale)));
         strip.removeFromLeft(int(6 * scale));
         resetTableBtn_.setBounds(strip.reduced(0, int(1 * scale)));
+    }
+
+    // v0.19: the filter TYPE box sits under CUTOFF / RESONANCE
+    if (filterKnobs_[0] != nullptr)
+    {
+        juce::Rectangle<int> strips[2];
+        for (int n = 0; n < 2; ++n)
+        {
+            auto b = filterKnobs_[n]->slider.getBounds();
+            strips[n] = b.removeFromBottom(int(28 * scale));
+            filterKnobs_[n]->slider.setBounds(b);
+        }
+        filterTypeBox_.setBounds(strips[0].getUnion(strips[1]).reduced(int(6 * scale), int(2 * scale)));
     }
 
     // v0.17: the LFO shape boxes sit under the knob pairs (the four knobs give up the bottom strip)

@@ -111,6 +111,26 @@ class subtractiveVoice {
         float templ; // These don't need to be zero initialized because they are
         float tempr; // directly assigned values, it doesn't matter if they start as garbage data
 
+        // v0.19 key tracking / velocity: one frequency scale for the filter, worked out again only when something it depends on changed.
+        // With both amounts at 0 (the default) the filter is not touched at all.
+        if (key_track != 0.f || vel_track != 0.f)
+        {
+            if (frequency != sc_freq || velocity != sc_vel || key_track != sc_key || vel_track != sc_velamt)
+            {
+                sc_freq = frequency; sc_vel = velocity; sc_key = key_track; sc_velamt = vel_track;
+                float s = frequency > 0.f ? powf(frequency / 261.63f, key_track) : 1.f;                 // 1 = follows the pitch octave for octave
+                s *= exp2f(-vel_track * 4.f * (1.f - fclamp(velocity, 0.f, 1.f)));                      // full velocity = no change, softer = darker
+                filter_.SetFreqScale(fclamp(s, 1.f / 64.f, 64.f));
+                scale_on = true;
+            }
+        }
+        else if (scale_on)
+        {
+            filter_.SetFreqScale(1.f);
+            scale_on = false;
+            sc_freq = -1.f;
+        }
+
         //filter LFO value is 0 when toggled off - additive, same math as the old LFO mode
         filter_.SetControl(cutoff_position + *filter_lfo_val_);
         
@@ -138,6 +158,10 @@ class subtractiveVoice {
     bool activeFromUser;
     bool activeFromSequencer;
     float velocity = 1.f;
+    // v0.19: how much the filter follows the note's pitch / its velocity (0..1 each; 0 = off), and the cache for the scale they give
+    float key_track = 0.f, vel_track = 0.f;
+    float sc_freq = -1.f, sc_vel = -1.f, sc_key = 0.f, sc_velamt = 0.f;
+    bool  scale_on = false;
 
     private:
     float *filter_lfo_val_;
@@ -550,6 +574,17 @@ class myEngine {
         for (int i = 0; i < NUM_VOICES; ++i) {
             myVoices[i].cutoff_position = amount;
         }
+    }
+
+    // v0.19 filter type (0 DJ as always, 1 low-pass, 2 high-pass, 3 band-pass), key tracking and velocity to cutoff (0..1, 0 = off)
+    void setFilterType(int type) {
+        for (int i = 0; i < NUM_VOICES; ++i) myVoices[i].filter_.SetType(type);
+    }
+    void setFilterKeyTrack(float amount) {
+        for (int i = 0; i < NUM_VOICES; ++i) myVoices[i].key_track = fclamp(amount, 0.f, 1.f);
+    }
+    void setFilterVelocity(float amount) {
+        for (int i = 0; i < NUM_VOICES; ++i) myVoices[i].vel_track = fclamp(amount, 0.f, 1.f);
     }
 
     void setMasterResonance(float amount) {

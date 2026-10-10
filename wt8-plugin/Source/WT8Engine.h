@@ -34,6 +34,9 @@ class WT8Engine
         float filterLfoRate  = 0.58f; // 0..1
         int   pitchLfoShape  = 0;     // v0.17: 0 triangle (as before), 1 sine, 2 saw down, 3 saw up, 4 square
         int   filterLfoShape = 0;     // v0.17: same
+        int   filterType     = 0;     // v0.19: 0 DJ (as always), 1 low-pass, 2 high-pass, 3 band-pass
+        float filterKey      = 0.f;   // v0.19: 0..1, how much the cutoff follows the note's pitch (0 = off)
+        float filterVel      = 0.f;   // v0.19: 0..1, how much a softer note darkens the filter (0 = off)
         float gain           = 0.84f; // 0..1
         float pan            = 0.5f;  // 0..1
         float comp           = 0.f;   // 0..1  (<.5 compressor, >.5 saturation)
