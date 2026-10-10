@@ -3,6 +3,7 @@
 
 #pragma once
 #include "BasicMMF.h"
+#include "FilterMaps.h"
 
 using namespace chompi;
 
@@ -36,7 +37,7 @@ class DjFilter
 
         // v0.19: the single-filter types
         single_.Init(samplerate);
-        single_.SetRes(.6f);
+        single_.SetRes(singleFilterResonance(.6f / .95f));
         SetType(0);
     }
 
@@ -124,7 +125,7 @@ class DjFilter
 
         feedback_filt_lhp_.SetRes(res);
         feedback_filt_rhp_.SetRes(res);
-        single_.SetRes(res);
+        single_.SetRes(singleFilterResonance(res / .95f)); // v0.20: a little more resonance in the new types (the DJ filter above is untouched)
     }
 
     float sr_;

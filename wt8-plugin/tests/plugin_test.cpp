@@ -2,6 +2,7 @@
 #include "PluginProcessor.h"
 #include "WavetableImport.h"
 #include "filter_golden.h"
+#include "engine/FilterMaps.h"
 #include <cstring>
 #include <cstdlib>
 #include <limits>
@@ -1875,6 +1876,111 @@ int main()
             auto target = makeProc(); setN(*target, "filtertype", 2.f); setN(*target, "filterkey", 1.f); setN(*target, "filtervel", 1.f);
             target->setStateInformation(oldState.getData(), (int) oldState.getSize());
             check(*target->apvts.getRawParameterValue("filtertype") == 0.f && *target->apvts.getRawParameterValue("filterkey") == 0.f && *target->apvts.getRawParameterValue("filtervel") == 0.f, "a project from before v0.19: DJ, KEY 0, VEL 0");
+        }
+        // ---- v0.20: more resonance in the new types, and the filter envelope ----
+        {
+            // resonance map: about +17 % at the default knob, never past the stable limit, never less than the old value, rising with the knob
+            const float def = chompi::singleFilterResonance(0.63f), oldDef = 0.63f * 0.95f;
+            printf("  (resonance at the default knob: %.4f, was %.4f = %+.1f %%; at the top: %.4f, was %.4f)\n", (double) def, (double) oldDef, (double) ((def / oldDef - 1.f) * 100.f), (double) chompi::singleFilterResonance(0.99f), (double) (0.99f * 0.95f));
+            check(def / oldDef > 1.15f && def / oldDef < 1.20f, "new types: resonance at the default knob is 15-20 % more than before");
+            bool mono = true, safe = true, never_less = true; float prev = -1.f, top = 0.f;
+            for (int i = 0; i <= 99; ++i)
+            {
+                const float k = i / 100.f, r = chompi::singleFilterResonance(k);
+                if (r < prev - 1e-6f) mono = false;
+                if (r > 0.965f) safe = false;
+                if (r < k * 0.95f - 1e-6f) never_less = false;
+                prev = r; top = std::fmax(top, r);
+            }
+            check(mono && never_less, "the resonance map rises with the knob and is never below the old value");
+            check(safe, "...and stays below 0.965 (the filter core is unstable from about 1.0)");
+            // the DJ type must not have changed: covered by the recording above (type DJ, resonance 0.8)
+        }
+        {   // resonance sweep in the new types, all cutoffs, finite and bounded
+            bool ok2 = true; float worst2 = 0;
+            for (int type = 1; type <= 3; ++type) for (float cutoff : {0.05f, 0.3f, 0.6f, 0.9f, 1.f}) for (float res : {0.5f, 0.63f, 0.8f, 0.9f, 1.f})
+            { const Out o = render(type, cutoff, res, 0.f, 0.f, 48, 100); worst2 = std::fmax(worst2, o.pk); if (!o.fin || o.pk > 3.f) { ok2 = false; printf("    unstable: type %d cutoff %.2f res %.2f peak %.3g\n", type, (double) cutoff, (double) res, (double) o.pk); } }
+            printf("  (resonance sweep: largest peak %.3f)\n", (double) worst2);
+            check(ok2, "new types, resonance 0.5..1 across the cutoff range: finite and bounded");
+        }
+
+        // ---- filter envelope ----
+        // blockwise RMS of the left channel for a held note; env params set through the processor
+        auto envRender = [&](int type, float cutoff, float envAmt, float decay, int note, int velocity, int blocks, bool secondNote = false) {
+            auto pr = makeProc();
+            setN(*pr, "filtertype", (float) type); setN(*pr, "cutoff", cutoff); setN(*pr, "resonance", 0.3f);
+            setN(*pr, "filterenv", envAmt); setN(*pr, "filterdecay", decay);
+            juce::AudioBuffer<float> b(2, bs); juce::MidiBuffer m, none, m2; m.addEvent(juce::MidiMessage::noteOn(1, note, (juce::uint8) velocity), 0);
+            m2.addEvent(juce::MidiMessage::noteOn(1, note + 7, (juce::uint8) velocity), 0);
+            std::vector<float> rmsB; bool fin = true; float pk = 0;
+            for (int blk = 0; blk < blocks; ++blk)
+            {
+                b.clear(); pr->processBlock(b, blk == 0 ? m : (secondNote && blk == blocks / 2 ? m2 : none));
+                double e = 0; for (int i = 0; i < bs; ++i) { const float x = b.getSample(0, i); if (!std::isfinite(x)) fin = false; pk = std::fmax(pk, std::fabs(x)); e += x * x; }
+                rmsB.push_back((float) std::sqrt(e / bs));
+            }
+            struct R { std::vector<float> r; bool fin; float pk; } out{rmsB, fin, pk};
+            return out;
+        };
+        auto avg = [](const std::vector<float>& v, int a, int c) { double t = 0; for (int i = a; i < c; ++i) t += v[(size_t) i]; return (float) (t / std::max(1, c - a)); };
+        {
+            const auto off = envRender(1, 0.25f, 0.f, 0.5f, 57, 100, 90);
+            const auto up = envRender(1, 0.25f, 1.f, 0.5f, 57, 100, 90);
+            const auto dn = envRender(1, 0.6f, -1.f, 0.5f, 57, 100, 90);
+            const auto dnRef = envRender(1, 0.6f, 0.f, 0.5f, 57, 100, 90);
+            printf("  (envelope, low-pass rms early / late: off %.4f / %.4f, ENV +100 %% %.4f / %.4f, ENV -100 %% %.4f / %.4f vs off %.4f / %.4f)\n",
+                   (double) avg(off.r, 1, 6), (double) avg(off.r, 70, 90), (double) avg(up.r, 1, 6), (double) avg(up.r, 70, 90), (double) avg(dn.r, 1, 6), (double) avg(dn.r, 70, 90), (double) avg(dnRef.r, 1, 6), (double) avg(dnRef.r, 70, 90));
+            check(off.fin && up.fin && dn.fin, "envelope: finite");
+            check(avg(up.r, 1, 6) > avg(off.r, 1, 6) * 1.5f, "ENV +100 %: the start of a note is much brighter/louder through a low-pass than with ENV 0");
+            check(std::fabs(avg(up.r, 70, 90) - avg(off.r, 70, 90)) < 0.05f * avg(off.r, 70, 90) + 1e-6f, "ENV +100 %: after the decay the sound has settled back to the ENV 0 sound");
+            check(avg(dn.r, 1, 6) < avg(dnRef.r, 1, 6) * 0.7f, "ENV -100 %: the start of a note is darker than with ENV 0");
+            check(std::fabs(avg(dn.r, 70, 90) - avg(dnRef.r, 70, 90)) < 0.05f * avg(dnRef.r, 70, 90) + 1e-6f, "ENV -100 %: ...and it recovers to the ENV 0 sound");
+            // decay time: a long decay is still open at ~0.5 s, a short one has already settled
+            const auto shortD = envRender(1, 0.25f, 1.f, 0.f, 57, 100, 60), longD = envRender(1, 0.25f, 1.f, 1.f, 57, 100, 60);
+            const auto offS = envRender(1, 0.25f, 0.f, 0.5f, 57, 100, 60);
+            check(avg(longD.r, 25, 45) > avg(shortD.r, 25, 45) * 1.3f, "DECAY: a long decay is still open at 0.3-0.5 s where a short one has settled");
+            check(std::fabs(avg(shortD.r, 25, 45) - avg(offS.r, 25, 45)) < 0.1f * avg(offS.r, 25, 45) + 1e-6f, "DECAY short: back to the plain sound well before 0.3 s");
+            // a new note in the same voice set restarts the sweep
+            const auto two = envRender(1, 0.25f, 1.f, 0.3f, 57, 100, 120, true);
+            check(avg(two.r, 61, 66) > avg(two.r, 50, 55) * 1.3f, "a second note triggers a new sweep");
+            // DJ filter below the middle: opens too
+            const auto djUp = envRender(0, 0.15f, 1.f, 0.5f, 57, 100, 90), djOff = envRender(0, 0.15f, 0.f, 0.5f, 57, 100, 90);
+            printf("  (DJ envelope rms by block, ENV +100 %%: ");for (int i = 0; i < 40; i += 3) printf("%.4f ", (double) djUp.r[(size_t) i]); printf("| ENV 0: "); for (int i = 0; i < 40; i += 3) printf("%.4f ", (double) djOff.r[(size_t) i]); printf(")\n");
+            check(avg(djUp.r, 1, 6) > avg(djOff.r, 1, 6) * 1.5f, "DJ filter below the middle: ENV +100 % opens the start of a note");
+            // DJ filter with the cutoff in the middle (open): nothing to open
+            const auto djMid = envRender(0, 0.5f, 1.f, 0.5f, 57, 100, 30), djMid0 = envRender(0, 0.5f, 0.f, 0.5f, 57, 100, 30);
+            check(std::fabs(avg(djMid.r, 1, 6) - avg(djMid0.r, 1, 6)) < 0.03f * avg(djMid0.r, 1, 6) + 1e-6f, "DJ filter with the cutoff in the middle (open): ENV changes nothing audible");
+            // combined with KEY and VEL, limits, and moving the controls while notes sound
+            bool fin2 = true; float pk2 = 0;
+            for (int type = 0; type <= 3; ++type) for (float amt : {-1.f, 1.f}) for (float dec : {0.f, 1.f}) for (float cutoff : {0.f, 0.3f, 1.f})
+            { auto pr = makeProc(); setN(*pr, "filtertype", (float) type); setN(*pr, "cutoff", cutoff); setN(*pr, "resonance", 1.f); setN(*pr, "filterenv", amt); setN(*pr, "filterdecay", dec); setN(*pr, "filterkey", 1.f); setN(*pr, "filtervel", 1.f); setN(*pr, "filterlfodepth", 1.f);
+              juce::AudioBuffer<float> b(2, bs); juce::MidiBuffer m, none; m.addEvent(juce::MidiMessage::noteOn(1, 100, (juce::uint8) 20), 0); m.addEvent(juce::MidiMessage::noteOn(1, 24, (juce::uint8) 127), 50);
+              for (int blk = 0; blk < 60; ++blk) { b.clear(); pr->processBlock(b, blk == 0 ? m : none); for (int i = 0; i < bs; ++i) { const float x = b.getSample(0, i); if (!std::isfinite(x)) fin2 = false; pk2 = std::fmax(pk2, std::fabs(x)); } } }
+            printf("  (envelope stability sweep: largest peak %.3f)\n", (double) pk2);
+            check(fin2 && pk2 < 6.f, "stability: all types x ENV +/-100 % x DECAY extremes x cutoff x KEY / VEL 100 % x full LFO x resonance 1");
+            auto pr = makeProc(); setN(*pr, "filterlfodepth", 1.f);
+            juce::AudioBuffer<float> b(2, bs); juce::MidiBuffer m, none; m.addEvent(juce::MidiMessage::noteOn(1, 60, (juce::uint8) 100), 0);
+            bool fin3 = true;
+            for (int blk = 0; blk < 300; ++blk)
+            {
+                if (blk % 4 == 0) { setN(*pr, "filterenv", ((blk / 4) % 5 - 2) * 0.5f); setN(*pr, "filterdecay", (blk / 4 % 4) / 3.f); setN(*pr, "filtertype", (float) (blk / 4 % 4)); }
+                b.clear(); pr->processBlock(b, blk % 40 == 0 ? m : none);
+                for (int i = 0; i < bs; ++i) if (!std::isfinite(b.getSample(0, i)) || std::fabs(b.getSample(0, i)) > 8.f) fin3 = false;
+            }
+            check(fin3, "moving ENV, DECAY and TYPE every few blocks while notes sound stays finite");
+        }
+        {   // saved with the project; an older project has ENV 0 and DECAY 40 %
+            auto src = makeProc(); setN(*src, "filterenv", -0.5f); setN(*src, "filterdecay", 0.8f);
+            juce::MemoryBlock saved; src->getStateInformation(saved);
+            auto dst = makeProc(); dst->setStateInformation(saved.getData(), (int) saved.getSize());
+            check(std::fabs(*dst->apvts.getRawParameterValue("filterenv") + 0.5f) < 1e-4f && std::fabs(*dst->apvts.getRawParameterValue("filterdecay") - 0.8f) < 1e-4f, "ENV and DECAY are saved with the project");
+            auto xml = juce::AudioProcessor::getXmlFromBinary(saved.getData(), (int) saved.getSize());
+            for (auto* id : {"filterenv", "filterdecay"})
+                while (auto* ch = xml->getChildByAttribute("id", id)) xml->removeChildElement(ch, true);
+            juce::MemoryBlock oldState; juce::AudioProcessor::copyXmlToBinary(*xml, oldState);
+            auto target = makeProc(); setN(*target, "filterenv", 1.f); setN(*target, "filterdecay", 0.1f);
+            target->setStateInformation(oldState.getData(), (int) oldState.getSize());
+            check(*target->apvts.getRawParameterValue("filterenv") == 0.f && std::fabs(*target->apvts.getRawParameterValue("filterdecay") - 0.4f) < 1e-4f, "a project from before v0.20: ENV 0, DECAY 40");
         }
         printf("v0.19 filter: %s\n", v19Ok ? "ok" : "FAILED");
     }

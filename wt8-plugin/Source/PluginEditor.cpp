@@ -755,6 +755,8 @@ WT8Editor::WT8Editor(WT8AudioProcessor& p) : juce::AudioProcessorEditor(&p), pro
 
     auto& fkey    = addKnob("filterkey", "KEY", Kind::Percent); // v0.19
     auto& fvel    = addKnob("filtervel", "VEL", Kind::Percent);
+    auto& fenv    = addKnob("filterenv", "FILT ENV", Kind::Percent, true); // v0.20
+    auto& fdec    = addKnob("filterdecay", "FILT DECAY", Kind::Percent);
 
     auto& fx      = addKnob("fx",     "DELAY / REVERB", Kind::Percent);
     auto& fxTime  = addKnob("fxtime", "TIME",           Kind::Percent);
@@ -767,7 +769,7 @@ WT8Editor::WT8Editor(WT8AudioProcessor& p) : juce::AudioProcessorEditor(&p), pro
     filterKnobs_[0] = &cutoff; filterKnobs_[1] = &reso;
     lfoKnobs_[0] = &plfoD; lfoKnobs_[1] = &plfoR; lfoKnobs_[2] = &flfoD; lfoKnobs_[3] = &flfoR;
     row1_.push_back({"OSCILLATOR", {&table, &frame, &octave, &pitch}, {}, 2});
-    row1_.push_back({"ENVELOPE",   {&attack, &release}, {}});
+    row1_.push_back({"ENVELOPE",   {&attack, &release, &fenv, &fdec}, {}}); // v0.20: the filter envelope's two knobs sit with the amp envelope
     row1_.push_back({"FILTER",     {&cutoff, &reso}, {}});
     row2_.push_back({"LFO",        {&plfoD, &plfoR, &flfoD, &flfoR}, {}});
     row2_.push_back({"FILTER MOD", {&fkey, &fvel}, {}});
@@ -1472,6 +1474,7 @@ void WT8Editor::resized()
     {
         auto b = tableKnob_->slider.getBounds();
         auto strip = b.removeFromBottom(int(26 * scale));
+        strip.setWidth(strip.getWidth() + int(22 * scale)); // v0.20: the top row's cells are narrower, so the pair may reach a little into the free space to its right
         tableKnob_->slider.setBounds(b);
         const int bw = (strip.getWidth() - int(6 * scale)) / 2;
         loadTableBtn_.setBounds(strip.removeFromLeft(bw).reduced(0, int(1 * scale)));

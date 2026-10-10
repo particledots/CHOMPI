@@ -104,6 +104,10 @@ juce::AudioProcessorValueTreeState::ParameterLayout WT8AudioProcessor::createLay
     l.add(c("filtertype", "Filter Type", juce::StringArray{"DJ", "Low-pass", "High-pass", "Band-pass"}, 0, 6));
     l.add(f("filterkey", "Filter Key Tracking", 0.f, 1.f, 0.f, 6));
     l.add(f("filtervel", "Filter Velocity", 0.f, 1.f, 0.f, 6));
+
+    // v0.20 filter envelope. Version hint 7. Amount 0 (the default) = no envelope.
+    l.add(f("filterenv", "Filter Envelope Amount", -1.f, 1.f, 0.f, 7));
+    l.add(f("filterdecay", "Filter Envelope Decay", 0.f, 1.f, 0.4f, 7));
     return l;
 }
 
@@ -290,6 +294,8 @@ void WT8AudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
     p.filterType     = (int) *apvts.getRawParameterValue("filtertype");
     p.filterKey      = *apvts.getRawParameterValue("filterkey");
     p.filterVel      = *apvts.getRawParameterValue("filtervel");
+    p.filterEnv      = *apvts.getRawParameterValue("filterenv");
+    p.filterDecay    = *apvts.getRawParameterValue("filterdecay");
     p.gain           = *apvts.getRawParameterValue("gain");
     p.pan            = *apvts.getRawParameterValue("pan");
     p.comp           = *apvts.getRawParameterValue("comp");

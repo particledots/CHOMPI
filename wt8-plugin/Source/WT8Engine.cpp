@@ -87,6 +87,8 @@ struct WT8Engine::Impl
         if (changed(p.filterType, applied.filterType))         engine->setFilterType(p.filterType);
         if (changed(p.filterKey, applied.filterKey))           engine->setFilterKeyTrack(p.filterKey);
         if (changed(p.filterVel, applied.filterVel))           engine->setFilterVelocity(p.filterVel);
+        if (changed(p.filterEnv, applied.filterEnv))           engine->setFilterEnvAmount(p.filterEnv);
+        if (changed(p.filterDecay, applied.filterDecay))       engine->setFilterEnvDecay(p.filterDecay);
         if (changed(p.gain, applied.gain))                   engine->setGain(p.gain);
         if (changed(p.pan, applied.pan))                     engine->setPan(p.pan);
         if (changed(p.comp, applied.comp))                   engine->setFinalComp(p.comp);

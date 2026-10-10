@@ -37,6 +37,8 @@ class WT8Engine
         int   filterType     = 0;     // v0.19: 0 DJ (as always), 1 low-pass, 2 high-pass, 3 band-pass
         float filterKey      = 0.f;   // v0.19: 0..1, how much the cutoff follows the note's pitch (0 = off)
         float filterVel      = 0.f;   // v0.19: 0..1, how much a softer note darkens the filter (0 = off)
+        float filterEnv      = 0.f;   // v0.20: -1..1, how far the filter envelope moves the cutoff (0 = off)
+        float filterDecay    = 0.4f;  // v0.20: 0..1, the envelope's decay (10 ms to 4 s)
         float gain           = 0.84f; // 0..1
         float pan            = 0.5f;  // 0..1
         float comp           = 0.f;   // 0..1  (<.5 compressor, >.5 saturation)

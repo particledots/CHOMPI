@@ -91,6 +91,12 @@ class subtractiveVoice {
         amp_env.Init(sample_rate);
         amp_env.SetSustainLevel(1.f); //This won't change
 
+        filt_env.Init(sample_rate); // v0.20 filter envelope
+        filt_env.SetAttackTime(.002f, 0.f);
+        filt_env.SetDecayTime(chompi::filterEnvDecaySeconds(.4f));
+        filt_env.SetSustainLevel(0.f);
+        filt_env.SetReleaseTime(.05f);
+
         cutoff_position = .5f;
         filter_.Init(sample_rate);
         filter_.SetControl(.5f);
@@ -111,24 +117,38 @@ class subtractiveVoice {
         float templ; // These don't need to be zero initialized because they are
         float tempr; // directly assigned values, it doesn't matter if they start as garbage data
 
-        // v0.19 key tracking / velocity: one frequency scale for the filter, worked out again only when something it depends on changed.
-        // With both amounts at 0 (the default) the filter is not touched at all.
-        if (key_track != 0.f || vel_track != 0.f)
+        // v0.19 key tracking / velocity and v0.20 filter envelope: one frequency scale for the filter. Key / velocity part is worked out
+        // again only when something it depends on changed. With KEY, VEL and ENV all at 0 (the default) the filter is not touched at all.
+        const bool kv = key_track != 0.f || vel_track != 0.f;
+        const bool ev = env_amt != 0.f;
+        if (kv)
         {
             if (frequency != sc_freq || velocity != sc_vel || key_track != sc_key || vel_track != sc_velamt)
             {
                 sc_freq = frequency; sc_vel = velocity; sc_key = key_track; sc_velamt = vel_track;
                 float s = frequency > 0.f ? powf(frequency / 261.63f, key_track) : 1.f;                 // 1 = follows the pitch octave for octave
                 s *= exp2f(-vel_track * 4.f * (1.f - fclamp(velocity, 0.f, 1.f)));                      // full velocity = no change, softer = darker
-                filter_.SetFreqScale(fclamp(s, 1.f / 64.f, 64.f));
-                scale_on = true;
+                base_scale = s;
             }
+        }
+        else
+        {
+            base_scale = 1.f;
+            sc_freq = -1.f;
+        }
+        if (kv || ev)
+        {
+            float s = base_scale;
+            // v0.20 filter envelope: jumps up at each note start and falls back over DECAY; ENV > 0 opens the filter by up to 4 octaves at the
+            // peak, ENV < 0 closes it by up to 4 octaves
+            if (ev) s *= exp2f(env_amt * 4.f * filt_env.Process(gate));
+            filter_.SetFreqScale(fclamp(s, 1.f / 64.f, 64.f));
+            scale_on = true;
         }
         else if (scale_on)
         {
             filter_.SetFreqScale(1.f);
             scale_on = false;
-            sc_freq = -1.f;
         }
 
         //filter LFO value is 0 when toggled off - additive, same math as the old LFO mode
@@ -160,6 +180,9 @@ class subtractiveVoice {
     float velocity = 1.f;
     // v0.19: how much the filter follows the note's pitch / its velocity (0..1 each; 0 = off), and the cache for the scale they give
     float key_track = 0.f, vel_track = 0.f;
+    float env_amt = 0.f;           // v0.20: -1..1 (0 = off)
+    float base_scale = 1.f;
+    Adsr filt_env;                 // v0.20: filter envelope (instant attack, falls to 0 over DECAY, no sustain)
     float sc_freq = -1.f, sc_vel = -1.f, sc_key = 0.f, sc_velamt = 0.f;
     bool  scale_on = false;
 
@@ -582,6 +605,13 @@ class myEngine {
     }
     void setFilterKeyTrack(float amount) {
         for (int i = 0; i < NUM_VOICES; ++i) myVoices[i].key_track = fclamp(amount, 0.f, 1.f);
+    }
+    // v0.20 filter envelope: amount -1..1 (0 = off), decay 0..1 (10 ms to 4 s)
+    void setFilterEnvAmount(float amount) {
+        for (int i = 0; i < NUM_VOICES; ++i) myVoices[i].env_amt = fclamp(amount, -1.f, 1.f);
+    }
+    void setFilterEnvDecay(float amount) {
+        for (int i = 0; i < NUM_VOICES; ++i) myVoices[i].filt_env.SetDecayTime(chompi::filterEnvDecaySeconds(amount));
     }
     void setFilterVelocity(float amount) {
         for (int i = 0; i < NUM_VOICES; ++i) myVoices[i].vel_track = fclamp(amount, 0.f, 1.f);
