@@ -281,9 +281,25 @@ class myEngine {
 
         // Fill from wavetable
         for (size_t i = 0; i < size; ++i) {
-            filter_lfo_val = filter_lfo_on ? filterLfo.Process() : 0.f;
+            float filterLfoOut = 0.f;
+            if (filter_lfo_on) {
+                filterLfoOut = filterLfo.Process();
+                if (filterLfoSH) { // v0.23 sample and hold: Process() only advances the phase; IsEOC() marks a cycle end
+                    if (filterLfo.IsEOC()) filterLfoHeld = lfoRandom(filterLfoRng);
+                    filterLfoOut = filterLfoHeld * filterLfoAmp;
+                }
+            }
+            filter_lfo_val = filterLfoOut;
+            float pitchLfoOut = 0.f;
+            if (pitch_lfo_on) {
+                pitchLfoOut = pitchLfo.Process();
+                if (pitchLfoSH) {
+                    if (pitchLfo.IsEOC()) pitchLfoHeld = lfoRandom(pitchLfoRng);
+                    pitchLfoOut = pitchLfoHeld * pitchLfoAmp;
+                }
+            }
             pitch_lfo_mult = pitch_lfo_on
-                ? powf(2.f, pitchLfo.Process() * (2.f / 12.f)) // full depth = +/- 2 semitones
+                ? powf(2.f, pitchLfoOut * (2.f / 12.f)) // full depth = +/- 2 semitones
                 : 1.f;
 
             float sigl = 0.f;
@@ -448,6 +464,7 @@ class myEngine {
 
     void setLfoDepth(float amount) {
         filterLfo.SetAmp(amount);
+        filterLfoAmp = amount;
     }
 
     void setLfoRate(float amount) {
@@ -571,6 +588,9 @@ class myEngine {
     bool getFilterLfoOn() { return filter_lfo_on; }
 
     // v0.17: LFO shape. 0 = triangle (what both LFOs always were), 1 = sine, 2 = saw down, 3 = saw up, 4 = square.
+    // v0.23: 5 = sample and hold: a new random value (-1..1, scaled by the depth) at the end of every LFO cycle, held
+    // until the next one. The oscillator still runs at the LFO rate; it only supplies the cycle boundaries.
+    static constexpr int kLfoShapeSampleHold = 5;
     static uint8_t lfoWaveFor(int shape) {
         switch (shape) {
             case 1: return Oscillator::WAVE_SIN;
@@ -580,11 +600,25 @@ class myEngine {
             default: return Oscillator::WAVE_TRI;
         }
     }
-    void setPitchLfoShape(int shape) { pitchLfo.SetWaveform(lfoWaveFor(shape)); }
-    void setFilterLfoShape(int shape) { filterLfo.SetWaveform(lfoWaveFor(shape)); }
+    // xorshift32 -> -1 .. just under 1 (24 bits). Own state per LFO, so nothing here touches the C library's random.
+    static float lfoRandom(uint32_t& s) {
+        s ^= s << 13; s ^= s >> 17; s ^= s << 5;
+        return (float)(s >> 8) * (1.f / 8388608.f) - 1.f;
+    }
+    void setPitchLfoShape(int shape) {
+        pitchLfoSH = (shape == kLfoShapeSampleHold);
+        pitchLfo.SetWaveform(lfoWaveFor(pitchLfoSH ? 0 : shape));
+        if (pitchLfoSH) pitchLfoHeld = lfoRandom(pitchLfoRng); // a value at once, not only after the first cycle (7 s at the slowest rate)
+    }
+    void setFilterLfoShape(int shape) {
+        filterLfoSH = (shape == kLfoShapeSampleHold);
+        filterLfo.SetWaveform(lfoWaveFor(filterLfoSH ? 0 : shape));
+        if (filterLfoSH) filterLfoHeld = lfoRandom(filterLfoRng);
+    }
 
     void setPitchLfoDepth(float amount) {
         pitchLfo.SetAmp(amount);
+        pitchLfoAmp = amount;
     }
 
     void setPitchLfoRate(float amount) {
@@ -817,6 +851,11 @@ class myEngine {
     chompi::Limiter lim_line_l_;
     chompi::Limiter lim_line_r_;
     daisysp::Oscillator filterLfo;
+    // v0.23 sample-and-hold state (only used while the LFO's shape is 5)
+    bool pitchLfoSH = false, filterLfoSH = false;
+    float pitchLfoHeld = 0.f, filterLfoHeld = 0.f;   // -1..1, the value being held
+    float pitchLfoAmp = 0.f, filterLfoAmp = 0.f;     // the depth, tracked here because the oscillator keeps its amplitude private
+    uint32_t pitchLfoRng = 0x9E3779B9u, filterLfoRng = 0x85EBCA6Bu;
     float final_lim_, final_lim_target_;
     bool switch_state;
     float master_cutoff;

@@ -32,7 +32,7 @@ class WT8Engine
         float pitchLfoRate   = 0.58f; // 0..1
         float filterLfoDepth = 0.f;   // 0..1
         float filterLfoRate  = 0.58f; // 0..1
-        int   pitchLfoShape  = 0;     // v0.17: 0 triangle (as before), 1 sine, 2 saw down, 3 saw up, 4 square
+        int   pitchLfoShape  = 0;     // v0.17: 0 triangle (as before), 1 sine, 2 saw down, 3 saw up, 4 square; v0.23: 5 sample and hold
         int   filterLfoShape = 0;     // v0.17: same
         int   filterType     = 0;     // v0.19: 0 DJ (as always), 1 low-pass, 2 high-pass, 3 band-pass
         float filterKey      = 0.f;   // v0.19: 0..1, how much the cutoff follows the note's pitch (0 = off)

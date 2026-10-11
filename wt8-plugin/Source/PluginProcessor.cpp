@@ -100,7 +100,8 @@ juce::AudioProcessorValueTreeState::ParameterLayout WT8AudioProcessor::createLay
 
 #if !WT8_MIDI_FX
     // v0.17 LFO shapes. Version hint 5: added after v0.16 shipped. Item 0 = Triangle, which is what both LFOs always were.
-    const juce::StringArray lfoShapes{"Triangle", "Sine", "Saw down", "Saw up", "Square"};
+    // v0.23 appends item 5, Sample & hold (the earlier items keep their numbers, so saved projects load unchanged).
+    const juce::StringArray lfoShapes{"Triangle", "Sine", "Saw down", "Saw up", "Square", "Sample & hold"};
     l.add(c("pitchlfoshape", "Pitch LFO Shape", lfoShapes, 0, 5));
     l.add(c("filterlfoshape", "Filter LFO Shape", lfoShapes, 0, 5));
 

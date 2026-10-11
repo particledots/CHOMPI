@@ -1697,7 +1697,8 @@ int main()
 
         auto keepProc = makeProc();
         auto* ps = dynamic_cast<juce::AudioParameterChoice*>(keepProc->apvts.getParameter("pitchlfoshape"));
-        check(ps != nullptr && ps->choices.size() == 5 && ps->choices[0] == "Triangle", "pitch LFO shape: 5 choices, the first is Triangle");
+        check(ps != nullptr && ps->choices.size() == 6 && ps->choices[0] == "Triangle" && ps->choices[4] == "Square" && ps->choices[5] == "Sample & hold",
+              "pitch LFO shape: 6 choices, Triangle first, the five older ones keep their numbers, Sample & hold is the new last one");
         { auto pr = makeProc(); check(getN(*pr, "pitchlfoshape") == 0.f && getN(*pr, "filterlfoshape") == 0.f, "both shapes default to Triangle (= what the LFOs always were)"); }
 
         for (int which = 0; which < 2; ++which)
@@ -1711,7 +1712,7 @@ int main()
             auto [nolfo, f2, p2] = render(-1, -1, false, false);
             check(diff(base, nolfo) > 0.01f, (std::string(nm) + " LFO: the LFO audibly does something at full depth (so the shape test means something)").c_str());
             std::vector<std::vector<float>> shapes;
-            for (int sh = 1; sh <= 4; ++sh)
+            for (int sh = 1; sh <= 5; ++sh)
             {
                 auto [o, ff, pp] = render(pitchLfo ? sh : -1, pitchLfo ? -1 : sh, pitchLfo, !pitchLfo);
                 check(ff && pp > 0.01f && pp < 4.f, (std::string(nm) + " LFO shape " + std::to_string(sh) + ": finite, audible, bounded").c_str());
@@ -1720,10 +1721,12 @@ int main()
             }
             bool distinct = true;
             for (size_t a = 0; a < shapes.size(); ++a) for (size_t c = a + 1; c < shapes.size(); ++c) if (diff(shapes[a], shapes[c]) < 0.01f) distinct = false;
-            check(distinct, (std::string(nm) + " LFO: the four other shapes also differ from each other").c_str());
+            check(distinct, (std::string(nm) + " LFO: the five other shapes (v0.23: Sample & hold included) also differ from each other").c_str());
             // the shape of an LFO that has depth 0 changes nothing
             auto [z, fz, pz] = render(pitchLfo ? 4 : -1, pitchLfo ? -1 : 4, false, false);
             check(diff(z, nolfo) == 0.f, (std::string(nm) + " LFO: a shape does nothing while its depth is 0").c_str());
+            auto [zs, fzs, pzs] = render(pitchLfo ? 5 : -1, pitchLfo ? -1 : 5, false, false);
+            check(diff(zs, nolfo) == 0.f, (std::string(nm) + " LFO: Sample & hold does nothing while its depth is 0").c_str());
         }
         // the shape of one LFO does not change the other one
         { auto [a, fa, pa] = render(-1, -1, true, false); auto [c, fc, pc] = render(-1, 4, true, false);
@@ -1735,6 +1738,21 @@ int main()
             juce::MemoryBlock saved; src->getStateInformation(saved);
             auto dst = makeProc(); dst->setStateInformation(saved.getData(), (int) saved.getSize());
             check(getN(*dst, "pitchlfoshape") == 4.f && getN(*dst, "filterlfoshape") == 2.f, "the two shapes are saved with the project");
+            { // v0.23: Sample & hold (5) is saved too, and a pre-v0.23 state (shapes 0-4) still loads exactly as it was
+                auto srcSH = makeProc(); setN(*srcSH, "pitchlfoshape", 5.f); setN(*srcSH, "filterlfoshape", 5.f);
+                juce::MemoryBlock savedSH; srcSH->getStateInformation(savedSH);
+                auto dstSH = makeProc(); dstSH->setStateInformation(savedSH.getData(), (int) savedSH.getSize());
+                check(getN(*dstSH, "pitchlfoshape") == 5.f && getN(*dstSH, "filterlfoshape") == 5.f, "Sample & hold is saved with the project and comes back");
+                for (int sh = 0; sh <= 4; ++sh)
+                {
+                    auto a = makeProc(); setN(*a, "pitchlfoshape", (float) sh); setN(*a, "filterlfoshape", (float) (4 - sh));
+                    juce::MemoryBlock m; a->getStateInformation(m);
+                    auto b2 = makeProc(); setN(*b2, "pitchlfoshape", 5.f); setN(*b2, "filterlfoshape", 5.f); // start from the new value, so a load that did nothing would show
+                    b2->setStateInformation(m.getData(), (int) m.getSize());
+                    check(getN(*b2, "pitchlfoshape") == (float) sh && getN(*b2, "filterlfoshape") == (float) (4 - sh),
+                          (std::string("shapes ") + std::to_string(sh) + " / " + std::to_string(4 - sh) + " (the five older ones) are saved and come back as the same shapes").c_str());
+                }
+            }
             auto xml = juce::AudioProcessor::getXmlFromBinary(saved.getData(), (int) saved.getSize());
             for (auto* id : {"pitchlfoshape", "filterlfoshape"})
                 while (auto* ch = xml->getChildByAttribute("id", id)) xml->removeChildElement(ch, true);
@@ -1750,13 +1768,108 @@ int main()
             bool fin = true;
             for (int blk = 0; blk < 300; ++blk)
             {
-                if (blk % 7 == 0) { setN(*pr, "pitchlfoshape", (float) (blk / 7 % 5)); setN(*pr, "filterlfoshape", (float) ((blk / 7 + 2) % 5)); }
+                if (blk % 7 == 0) { setN(*pr, "pitchlfoshape", (float) (blk / 7 % 6)); setN(*pr, "filterlfoshape", (float) ((blk / 7 + 2) % 6)); }
                 b.clear(); pr->processBlock(b, blk == 0 ? m : none);
                 for (int i = 0; i < bs; ++i) if (!std::isfinite(b.getSample(0, i))) fin = false;
             }
             check(fin, "switching both shapes every few blocks while a note sounds stays finite");
         }
         printf("v0.17 LFO shapes: %s\n", v17Ok ? "ok" : "FAILED");
+    }
+
+    // ---- v0.23: Sample & hold LFO shape (a new random value at the end of every LFO cycle, held until the next) ----
+    bool v23Ok = true;
+    {
+        auto check = [&](bool cond, const char* what) { printf("  %s: %s\n", cond ? "ok  " : "FAIL", what); v23Ok = v23Ok && cond; };
+        auto makeProc = [&]() { auto pr = std::make_unique<WT8AudioProcessor>(); pr->setPlayConfigDetails(0, 2, sr, bs); pr->prepareToPlay(sr, bs); return pr; };
+        auto setN = [&](WT8AudioProcessor& pr, const char* id, float real) { auto* q = pr.apvts.getParameter(id); q->setValueNotifyingHost(q->convertTo0to1(real)); };
+        const float kRateKnob = 0.386f;   // .14 * (65.41/.14)^0.386 = about 1.5 Hz: one LFO cycle about 0.67 s
+        const int   kWin = (int) (sr * 0.1);  // 100 ms analysis windows
+        // one held note, about 4 s, left channel. pitch = true: pitch LFO (shape `shape`) at full depth, else filter LFO (low-pass filter) at full depth.
+        auto render = [&](bool pitch, int shape) {
+            auto pr = makeProc();
+            if (pitch) { setN(*pr, "pitchlfoshape", (float) shape); setN(*pr, "pitchlfodepth", 1.f); setN(*pr, "pitchlforate", kRateKnob); }
+            else       { setN(*pr, "filterlfoshape", (float) shape); setN(*pr, "filterlfodepth", 1.f); setN(*pr, "filterlforate", kRateKnob);
+                         setN(*pr, "filtertype", 1.f); setN(*pr, "cutoff", 0.35f); }
+            juce::AudioBuffer<float> b(2, bs); juce::MidiBuffer m, none;
+            m.addEvent(juce::MidiMessage::noteOn(1, pitch ? 81 : 57, (juce::uint8) 100), 0);
+            std::vector<float> out; bool fin = true;
+            for (int blk = 0; blk < 345; ++blk)
+            {
+                b.clear(); pr->processBlock(b, blk == 0 ? m : none);
+                for (int i = 0; i < bs; ++i) { const float v = b.getSample(0, i); if (!std::isfinite(v)) fin = false; out.push_back(v); }
+            }
+            return std::make_pair(out, fin);
+        };
+        // per 100 ms window (the first one skipped: the attack): the number of upward zero crossings (proportional to the pitch) or the rms (the brightness)
+        auto windows = [&](const std::vector<float>& x, bool crossings) {
+            std::vector<double> w;
+            for (size_t s0 = (size_t) kWin; s0 + kWin <= x.size(); s0 += kWin)
+            {
+                double acc = 0;
+                for (size_t i = s0; i < s0 + kWin; ++i)
+                {
+                    if (crossings) acc += (x[i - 1] < 0.f && x[i] >= 0.f) ? 1.0 : 0.0;
+                    else acc += (double) x[i] * x[i];
+                }
+                w.push_back(crossings ? acc : std::sqrt(acc / kWin));
+            }
+            return w;
+        };
+        // consecutive window pairs that are "the same" (a held value keeps the pitch / brightness constant; a moving LFO does not)
+        auto samePairs = [&](const std::vector<double>& w, double tolRel, double tolAbs) {
+            int n = 0; for (size_t i = 0; i + 1 < w.size(); ++i) if (std::fabs(w[i] - w[i + 1]) <= std::fmax(tolAbs, tolRel * std::fmax(w[i], w[i + 1]))) ++n;
+            return n;
+        };
+        auto spread = [&](const std::vector<double>& w) { double lo = 1e30, hi = 0; for (double v : w) { lo = std::fmin(lo, v); hi = std::fmax(hi, v); } return hi / std::fmax(lo, 1e-9); };
+
+        // pitch LFO
+        auto [pTri, pTriFin] = render(true, 0);
+        auto [pSH, pSHFin] = render(true, 5);
+        auto wTri = windows(pTri, true), wSH = windows(pSH, true);
+        const int trPairs = samePairs(wTri, 0.007, 1.0), shPairs = samePairs(wSH, 0.007, 1.0);
+        printf("  (pitch: %zu windows; pairs with the same pitch: Triangle %d, Sample & hold %d; S&H pitch spread max/min %.3f)\n", wSH.size(), trPairs, shPairs, spread(wSH));
+        check(pTriFin && pSHFin, "pitch LFO Sample & hold: the output stays finite");
+        check(shPairs >= (int) wSH.size() * 6 / 10, "pitch LFO Sample & hold: the pitch holds steady between cycle ends (most 100 ms windows match their neighbour)");
+        check(trPairs <= (int) wTri.size() / 4, "pitch LFO Triangle (control): the pitch keeps moving, so few windows match (the test can tell the two apart)");
+        check(spread(wSH) >= 1.04, "pitch LFO Sample & hold: it visits different pitches (at least about a semitone between the highest and the lowest held value)");
+        { auto [again, fa] = render(true, 5); double d = 0; for (size_t i = 0; i < again.size(); ++i) d = std::fmax(d, std::fabs(again[i] - pSH[i]));
+          check(fa && d == 0.0, "pitch LFO Sample & hold: the same settings give the same sound twice (the random numbers are seeded, not from the clock)"); }
+
+        // filter LFO (low-pass: the cutoff follows the held value)
+        auto [fTri, fTriFin] = render(false, 0);
+        auto [fSH, fSHFin] = render(false, 5);
+        auto rTri = windows(fTri, false), rSH = windows(fSH, false);
+        const int ftrPairs = samePairs(rTri, 0.04, 1e-4), fshPairs = samePairs(rSH, 0.04, 1e-4);
+        printf("  (filter: pairs with the same level: Triangle %d, Sample & hold %d of %zu; S&H level spread max/min %.3f)\n", ftrPairs, fshPairs, rSH.size() - 1, spread(rSH));
+        check(fTriFin && fSHFin, "filter LFO Sample & hold: the output stays finite");
+        check(fshPairs >= (int) rSH.size() * 6 / 10, "filter LFO Sample & hold: the brightness holds steady between cycle ends");
+        check(ftrPairs <= (int) rTri.size() / 3, "filter LFO Triangle (control): the brightness keeps moving");
+        check(spread(rSH) >= 1.3, "filter LFO Sample & hold: it visits clearly different brightnesses");
+
+        // one LFO's shape does not touch the other
+        { auto a = makeProc(); setN(*a, "pitchlfodepth", 1.f); setN(*a, "pitchlforate", kRateKnob);
+          auto c = makeProc(); setN(*c, "pitchlfodepth", 1.f); setN(*c, "pitchlforate", kRateKnob); setN(*c, "filterlfoshape", 5.f); // filter LFO depth is 0
+          juce::AudioBuffer<float> ba(2, bs), bc(2, bs); juce::MidiBuffer m, none; m.addEvent(juce::MidiMessage::noteOn(1, 60, (juce::uint8) 100), 0);
+          float d = 0; for (int blk = 0; blk < 120; ++blk) { ba.clear(); bc.clear(); a->processBlock(ba, blk == 0 ? m : none); c->processBlock(bc, blk == 0 ? m : none);
+              for (int i = 0; i < bs; ++i) d = std::fmax(d, std::fabs(ba.getSample(0, i) - bc.getSample(0, i))); }
+          check(d == 0.f, "the filter LFO set to Sample & hold (depth 0) leaves a pitch-LFO sound bit-identical"); }
+
+        // depth changes and shape changes while a note sounds, at the fastest and slowest rates, stay finite and bounded
+        for (float rate : {0.f, 1.f})
+        {
+            auto pr = makeProc(); setN(*pr, "pitchlfoshape", 5.f); setN(*pr, "filterlfoshape", 5.f); setN(*pr, "pitchlforate", rate); setN(*pr, "filterlforate", rate);
+            juce::AudioBuffer<float> b(2, bs); juce::MidiBuffer m, none; m.addEvent(juce::MidiMessage::noteOn(1, 60, (juce::uint8) 100), 0);
+            bool fin = true; float pk = 0;
+            for (int blk = 0; blk < 400; ++blk)
+            {
+                if (blk % 9 == 0) { setN(*pr, "pitchlfodepth", (blk / 9) % 2 ? 1.f : 0.f); setN(*pr, "filterlfodepth", (blk / 9) % 3 ? 1.f : 0.f); }
+                b.clear(); pr->processBlock(b, blk == 0 ? m : none);
+                for (int i = 0; i < bs; ++i) { const float v = b.getSample(0, i); if (!std::isfinite(v)) fin = false; pk = std::fmax(pk, std::fabs(v)); }
+            }
+            check(fin && pk < 4.f, (std::string("Sample & hold on both LFOs, depth switched on and off while a note sounds, rate knob ") + (rate == 0.f ? "at the minimum" : "at the maximum") + ": finite and bounded").c_str());
+        }
+        printf("v0.23 Sample & hold LFO: %s\n", v23Ok ? "ok" : "FAILED");
     }
 
     // ---- v0.18: the step view (GRID / RING / 2 RINGS) is saved with the project ----
@@ -2013,7 +2126,7 @@ int main()
         printf("v0.19 filter: %s\n", v19Ok ? "ok" : "FAILED");
     }
 
-    bool ok = seqOk && v4Ok && v5Ok && v6Ok && v8Ok && v9Ok && v10Ok && v13Ok && v14Ok && v16Ok && v17Ok && v18Ok && v19Ok && finite && peak > 0.02f && peak <= 1.5f && held > 0.005f && tail < held * 0.05f && std::fabs(cutoff - 0.2f) < 0.01f;
+    bool ok = seqOk && v4Ok && v5Ok && v6Ok && v8Ok && v9Ok && v10Ok && v13Ok && v14Ok && v16Ok && v17Ok && v23Ok && v18Ok && v19Ok && finite && peak > 0.02f && peak <= 1.5f && held > 0.005f && tail < held * 0.05f && std::fabs(cutoff - 0.2f) < 0.01f;
     printf(ok ? "PASS\n" : "FAIL\n");
     return ok ? 0 : 1;
 }
