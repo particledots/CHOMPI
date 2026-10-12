@@ -9,6 +9,7 @@ const juce::Colour kEdge    (0xff34373d);
 const juce::Colour kAccent  (0xffe8a33d);
 const juce::Colour kText    (0xffd3d6db);
 const juce::Colour kDim     (0xff7f858f);
+const juce::Colour kValue   (0xffeef0f3); // v0.25: knob values
 const juce::Colour kTrack   (0xff3a3d44);
 
 juce::Font makeFont(float height, bool bold = false)
@@ -31,7 +32,7 @@ constexpr int kKnobRowsH = 378;
 // ---------------------------------------------------------------------------------------------
 IpmohcLookAndFeel::IpmohcLookAndFeel()
 {
-    setColour(juce::Slider::textBoxTextColourId, kText);
+    setColour(juce::Slider::textBoxTextColourId, kValue); // v0.25: the value is the stronger element, the name above it the dimmer one
     setColour(juce::Slider::textBoxBackgroundColourId, juce::Colours::transparentBlack);
     setColour(juce::Slider::textBoxOutlineColourId, juce::Colours::transparentBlack);
     setColour(juce::Slider::textBoxHighlightColourId, kAccent.withAlpha(0.35f));
@@ -96,7 +97,8 @@ juce::Font IpmohcLookAndFeel::getLabelFont(juce::Label& l)
 void IpmohcLookAndFeel::drawRotarySlider(juce::Graphics& g, int x, int y, int w, int h, float pos,
                                          float startAngle, float endAngle, juce::Slider& s)
 {
-    const auto bounds = juce::Rectangle<int>(x, y, w, h).toFloat().reduced(4.0f);
+    // v0.25: when the cell is taller than the dial is wide, the dial sits directly under its value (top of the cell) instead of floating in the middle
+    const auto bounds = juce::Rectangle<int>(x, y, w, juce::jmin(h, w)).toFloat().reduced(4.0f);
     const float dia = juce::jmin(bounds.getWidth(), bounds.getHeight());
     const auto c = bounds.getCentre();
     const float radius = dia * 0.5f;
@@ -653,7 +655,7 @@ WT8Editor::Knob& WT8Editor::addKnob(const juce::String& id, const juce::String& 
 
     s.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
     s.setRotaryParameters(juce::MathConstants<float>::pi * 1.2f, juce::MathConstants<float>::pi * 2.8f, true);
-    s.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 74, 18);
+    s.setTextBoxStyle(juce::Slider::TextBoxAbove, false, 74, 18); // v0.25: name, value, dial (the value used to sit under the dial, nearer the next knob's name than its own)
     s.setMouseDragSensitivity(kind == Kind::Pitch ? 800 : 250); // Pitch spans a lot of range: slower drag
     s.setScrollWheelEnabled(true);
     s.getProperties().set("bipolar", bipolar);
@@ -683,7 +685,7 @@ WT8Editor::Knob& WT8Editor::addKnob(const juce::String& id, const juce::String& 
             s.valueFromTextFunction = [](const juce::String& t) { return (double) t.getFloatValue(); };
             break;
         case Kind::Percent:
-            s.textFromValueFunction = [](double v) { return juce::String(juce::roundToInt(v * 100.0)); };
+            s.textFromValueFunction = [](double v) { return juce::String(juce::roundToInt(v * 100.0)) + "%"; }; // v0.25: shows its unit like SWING, dB, st
             s.valueFromTextFunction = [](const juce::String& t) { return (double) t.getFloatValue() / 100.0; };
             break;
         case Kind::Pan:
@@ -1454,6 +1456,15 @@ void WT8Editor::paint(juce::Graphics& g)
     for (auto& d : seqDividers_) g.fillRect(d);
 }
 
+// v0.25: the value box sits ABOVE the dial, directly under the knob's name, and is a little bigger than the name
+void WT8Editor::styleKnobValue(Knob& k, int boxW, float scale)
+{
+    k.slider.setTextBoxStyle(juce::Slider::TextBoxAbove, false, boxW, int(18 * scale));
+    for (auto* c : k.slider.getChildren())
+        if (auto* l = dynamic_cast<juce::Label*>(c))
+            l->getProperties().set("fontHeight", 13.0f * scale);
+}
+
 void WT8Editor::resized()
 {
     const float scale = getWidth() / 840.0f;
@@ -1487,11 +1498,10 @@ void WT8Editor::resized()
             for (size_t j = 0; j < grp.knobs.size(); ++j)
             {
                 auto cell = inner.withX(inner.getX() + (int) j * cellW).withWidth(cellW);
-                const int labelH = int(16 * scale);
+                const int labelH = int(14 * scale); // v0.25: name, value and dial are one tight group (value directly under its own name)
                 grp.knobs[j]->name.setBounds(cell.removeFromTop(labelH));
                 grp.knobs[j]->name.getProperties().set("fontHeight", (cellW < int(72 * scale) ? 9.5f : 11.0f) * scale); // v0.19: the narrower cells of the 4-group row get a slightly smaller label
-                const int textH = int(18 * scale);
-                grp.knobs[j]->slider.setTextBoxStyle(juce::Slider::TextBoxBelow, false, juce::jmax(48, int(cellW * 0.9f)), textH);
+                styleKnobValue(*grp.knobs[j], juce::jmax(48, int(cellW * 0.9f)), scale);
                 grp.knobs[j]->slider.setBounds(cell);
             }
             x += w + gap;
@@ -1563,9 +1573,10 @@ void WT8Editor::resized()
         {
             auto cell = juce::Rectangle<int>(block.getX() + (int) (n % 2) * cw, block.getY() + (int) (n / 2) * ch, cw, ch);
             auto* k = seqKnobs_[n];
-            k->name.setBounds(cell.removeFromTop(int(16 * scale)));
+            cell.removeFromBottom(int(10 * scale)); // v0.25: a visible gap between one knob group and the next row's name
+            k->name.setBounds(cell.removeFromTop(int(14 * scale)));
             k->name.getProperties().set("fontHeight", 11.0f * scale);
-            k->slider.setTextBoxStyle(juce::Slider::TextBoxBelow, false, int(76 * scale), int(18 * scale));
+            styleKnobValue(*k, int(76 * scale), scale);
             k->slider.setBounds(cell);
         }
     }

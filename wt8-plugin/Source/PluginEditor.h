@@ -203,6 +203,7 @@ class WT8Editor : public juce::AudioProcessorEditor, private juce::Timer
 
     Knob& addKnob(const juce::String& paramId, const juce::String& label, Kind kind, bool bipolar = false);
     void addGroup(const juce::String& title, std::initializer_list<Knob*> knobs);
+    void styleKnobValue(Knob& k, int boxW, float scale);
 
     WT8AudioProcessor& proc_;
     IpmohcLookAndFeel laf_;
