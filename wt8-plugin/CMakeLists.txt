@@ -74,7 +74,8 @@ juce_add_plugin(WT8
   PLUGIN_MANUFACTURER_CODE Ptdt
   PLUGIN_CODE Ipmo
   FORMATS ${WT8_FORMATS}
-  PRODUCT_NAME "ipmohc"
+  PRODUCT_NAME "ipmohc"   # the installed file stays ipmohc.component / ipmohc.vst3 (so a new build replaces the old one in place)
+  PLUGIN_NAME "IPMOK"     # v0.28: the name the host shows (Logic's plugin menu); display name only, the AU codes below are unchanged
   IS_SYNTH TRUE
   NEEDS_MIDI_INPUT TRUE
   NEEDS_MIDI_OUTPUT FALSE

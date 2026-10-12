@@ -1432,7 +1432,7 @@ void WT8Editor::paint(juce::Graphics& g)
     // header
     g.setColour(kText);
     g.setFont(makeFont(26.0f * scale, true));
-    g.drawText(WT8_MIDI_FX ? "dotriaconta-tone" : "ipmohc", juce::Rectangle<int>(int(20 * scale), 0, int(300 * scale), int(48 * scale)),
+    g.drawText(WT8_MIDI_FX ? "dotriaconta-tone" : "IPMOK", juce::Rectangle<int>(int(20 * scale), 0, int(300 * scale), int(48 * scale)),
                juce::Justification::centredLeft);
     g.setColour(kDim);
     g.setFont(makeFont(12.0f * scale));

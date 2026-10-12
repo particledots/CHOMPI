@@ -27,7 +27,7 @@ class WT8AudioProcessor : public juce::AudioProcessor
     juce::AudioProcessorEditor* createEditor() override;
     bool hasEditor() const override { return true; }
 
-    const juce::String getName() const override { return WT8_MIDI_FX ? "dotriaconta-tone" : "ipmohc"; }
+    const juce::String getName() const override { return WT8_MIDI_FX ? "dotriaconta-tone" : "IPMOK"; }
     bool acceptsMidi() const override { return true; }
 #if WT8_MIDI_FX
     bool producesMidi() const override { return true; }
