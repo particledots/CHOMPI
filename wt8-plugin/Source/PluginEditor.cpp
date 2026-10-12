@@ -92,7 +92,7 @@ void IpmohcLookAndFeel::positionComboBoxText(juce::ComboBox& box, juce::Label& l
 
 juce::Font IpmohcLookAndFeel::getLabelFont(juce::Label& l)
 {
-    return makeFont(l.getProperties().getWithDefault("fontHeight", 12.0f));
+    return makeFont(l.getProperties().getWithDefault("fontHeight", 12.0f), (bool) l.getProperties().getWithDefault("bold", false)); // v0.27: the knob names are bold
 }
 
 void IpmohcLookAndFeel::drawRotarySlider(juce::Graphics& g, int x, int y, int w, int h, float pos,
@@ -734,6 +734,7 @@ WT8Editor::Knob& WT8Editor::addKnob(const juce::String& id, const juce::String& 
     n.setJustificationType(juce::Justification::centred);
     n.setColour(juce::Label::textColourId, kLabel);
     n.getProperties().set("fontHeight", 11.0f);
+    n.getProperties().set("bold", true); // v0.27
     n.setLookAndFeel(&laf_);
     n.setInterceptsMouseClicks(false, false);
 
@@ -780,12 +781,12 @@ WT8Editor::WT8Editor(WT8AudioProcessor& p) : juce::AudioProcessorEditor(&p), pro
     filterKnobs_[0] = &cutoff; filterKnobs_[1] = &reso;
     lfoKnobs_[0] = &plfoD; lfoKnobs_[1] = &plfoR; lfoKnobs_[2] = &flfoD; lfoKnobs_[3] = &flfoR;
     row1_.push_back({"OSCILLATOR", {&table, &frame, &octave, &pitch}, {}, 2});
-    row1_.push_back({"ENVELOPE",   {&attack, &release, &fenv, &fdec}, {}}); // v0.20: the filter envelope's two knobs sit with the amp envelope
+    row1_.push_back({"ENVELOPE",   {&attack, &release, &fenv, &fdec}, {}, 0, true}); // v0.20: the filter envelope's two knobs sit with the amp envelope
     row1_.push_back({"FILTER",     {&cutoff, &reso}, {}});
     row2_.push_back({"LFO",        {&plfoD, &plfoR, &flfoD, &flfoR}, {}});
-    row2_.push_back({"FILTER MOD", {&fkey, &fvel}, {}});
-    row2_.push_back({"EFFECTS",    {&fx, &fxTime, &comp}, {}});
-    row2_.push_back({"OUTPUT",     {&gain, &pan, &boost}, {}});
+    row2_.push_back({"FILTER MOD", {&fkey, &fvel}, {}, 0, true});
+    row2_.push_back({"EFFECTS",    {&fx, &fxTime, &comp}, {}, 0, true});
+    row2_.push_back({"OUTPUT",     {&gain, &pan, &boost}, {}, 0, true});
 
     // ---- sequencer strip ----
     seqKnobs_ = {&addKnob("seq_gate",  "GATE",   Kind::Percent),    &addKnob("seq_prob",   "PROB",   Kind::Percent),
@@ -1500,6 +1501,11 @@ void WT8Editor::resized()
             {
                 auto cell = inner.withX(inner.getX() + (int) j * cellW).withWidth(cellW);
                 const int labelH = int(14 * scale); // v0.25: name, value and dial are one tight group (value directly under its own name)
+                if (grp.centre) // v0.27: name + value + dial (a dial is as tall as its cell is wide) sit in the middle of the panel
+                {
+                    const int contentH = labelH + int(18 * scale) + cellW;
+                    if (cell.getHeight() > contentH) cell = cell.withTrimmedTop((cell.getHeight() - contentH) / 2).withHeight(contentH);
+                }
                 grp.knobs[j]->name.setBounds(cell.removeFromTop(labelH));
                 grp.knobs[j]->name.getProperties().set("fontHeight", (cellW < int(72 * scale) ? 9.5f : 12.0f) * scale); // v0.26: 12 pt in wide cells (was 11); narrow cells stay 9.5 (10 cut DELAY / REVERB short at 630 px); v0.19: the narrower cells of the 4-group row get a slightly smaller label
                 styleKnobValue(*grp.knobs[j], juce::jmax(48, int(cellW * 0.9f)), scale);

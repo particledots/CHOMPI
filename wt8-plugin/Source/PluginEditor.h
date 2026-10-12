@@ -162,6 +162,7 @@ class WT8Editor : public juce::AudioProcessorEditor, private juce::Timer
         std::vector<Knob*> knobs;
         juce::Rectangle<int> bounds; // filled in by resized()
         int extraCells = 0;          // v0.12: room (in knob widths) kept free at the right of the group, for the table picture
+        bool centre = false;         // v0.27: no box under the dials in this group: centre name / value / dial vertically instead of leaving an empty band at the bottom
     };
 
     // Presets (sound settings, chosen from the header): INIT, the compiled-in STARTER presets (v0.9) and the user's files (v0.8).
