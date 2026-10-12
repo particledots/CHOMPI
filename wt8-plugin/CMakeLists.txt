@@ -5,7 +5,9 @@ if(APPLE)
   set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64" CACHE STRING "Universal: Apple silicon + Intel")
 endif()
 
-project(WT8 VERSION 0.1.0 LANGUAGES C CXX)
+# The version is the plugin's version in the host. Raise it with every release (v0.28.1 -> 0.28.1, v0.29 -> 0.29.0, ...): macOS and Logic cache a plugin's name
+# and details and only refresh them when the version of the installed file goes up (it was 0.1.0 until v0.28, which is why the IPMOK name stayed old in Logic's menu).
+project(WT8 VERSION 0.28.1 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
