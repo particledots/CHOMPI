@@ -203,6 +203,7 @@ class myEngine {
     subtractiveVoice myVoices[NUM_VOICES];
 
     void Init(float sample_rate, InterpolatedDelayLine::AudioSample* del, daisysp::Reverb* reverb, wavetableLoader *wtLoader) {
+        lfoSampleRate = sample_rate;
         for (int i = 0; i < NUM_VOICES; ++i) {
             myVoices[i].Init(sample_rate, &filter_lfo_val, &pitch_lfo_mult);
             myVoices[i].key = -1;
@@ -468,7 +469,9 @@ class myEngine {
     }
 
     void setLfoRate(float amount) {
-        filterLfo.SetFreq(.14f * powf(65.41f / .14f, amount));
+        filterLfoRateKnob = amount;
+        if (filterLfoSyncBeats <= 0.0) // v0.24: while the LFO is tempo-synced the knob is remembered but the tempo decides the rate
+            filterLfo.SetFreq(.14f * powf(65.41f / .14f, amount));
     }
 
     void setCycle(int8_t direction, bool direct) {
@@ -623,7 +626,37 @@ class myEngine {
 
     void setPitchLfoRate(float amount) {
         //same retuned exponential map as the filter LFO rate below
-        pitchLfo.SetFreq(.14f * powf(65.41f / .14f, amount));
+        pitchLfoRateKnob = amount;
+        if (pitchLfoSyncBeats <= 0.0)
+            pitchLfo.SetFreq(.14f * powf(65.41f / .14f, amount));
+    }
+
+    // v0.24 tempo-synced LFO rate. beats = the length of ONE LFO cycle in quarter notes (0 = free: the RATE knob decides, as always).
+    // A synced LFO runs at host tempo / beats; while the host plays it is also locked to the host's position (a cycle starts on the
+    // grid: bar 1 beat 1 is phase 0), so loops, relocations and the start of playback all land the same way every time.
+    void setPitchLfoSyncBeats(double beats) { applyLfoSync(pitchLfo, pitchLfoSyncBeats, pitchLfoLockPending, pitchLfoRateKnob, beats); }
+    void setFilterLfoSyncBeats(double beats) { applyLfoSync(filterLfo, filterLfoSyncBeats, filterLfoLockPending, filterLfoRateKnob, beats); }
+
+    // Call once per block, before rendering it: host tempo (<= 0: unknown, 120 is used), whether the host plays, its position in quarter
+    // notes at the START of the block (valid when havePpq) and the block length. Tempo changes retune the synced LFOs. They are locked to
+    // the position when playback starts, when the position jumps (a relocation, a cycle / loop), and when an LFO is switched to a division
+    // while the host plays. With the host stopped they keep running at the tempo.
+    void setHostTiming(double bpm, bool playing, bool havePpq, double ppq, int numSamples) {
+        const double b = bpm > 0.0 ? bpm : 120.0;
+        if (b != hostBpm) {
+            hostBpm = b;
+            if (pitchLfoSyncBeats > 0.0) pitchLfo.SetFreq((float)(hostBpm / 60.0 / pitchLfoSyncBeats));
+            if (filterLfoSyncBeats > 0.0) filterLfo.SetFreq((float)(hostBpm / 60.0 / filterLfoSyncBeats));
+        }
+        const bool lockable = playing && havePpq;
+        if (lockable) {
+            const bool relock = !hostWasPlaying || std::fabs(ppq - hostExpectedPpq) > kHostJumpBeats;
+            hostExpectedPpq = ppq + (double) numSamples * hostBpm / 60.0 / (double) lfoSampleRate;
+            if (relock || pitchLfoLockPending) lockLfoToPpq(pitchLfo, pitchLfoSyncBeats, ppq);
+            if (relock || filterLfoLockPending) lockLfoToPpq(filterLfo, filterLfoSyncBeats, ppq);
+            pitchLfoLockPending = filterLfoLockPending = false;
+        }
+        hostWasPlaying = lockable;
     }
 
     void setMasterCutoff(float amount) {
@@ -856,6 +889,25 @@ class myEngine {
     float pitchLfoHeld = 0.f, filterLfoHeld = 0.f;   // -1..1, the value being held
     float pitchLfoAmp = 0.f, filterLfoAmp = 0.f;     // the depth, tracked here because the oscillator keeps its amplitude private
     uint32_t pitchLfoRng = 0x9E3779B9u, filterLfoRng = 0x85EBCA6Bu;
+    // v0.24 tempo-synced LFO rate state (beats per LFO cycle: 0 = free)
+    static constexpr double kHostJumpBeats = 1.0 / 32.0; // a host position further than this from where the last block ended = a jump
+    double pitchLfoSyncBeats = 0.0, filterLfoSyncBeats = 0.0;
+    float  pitchLfoRateKnob = .58f, filterLfoRateKnob = .58f; // the free rate settings, kept while synced
+    bool   pitchLfoLockPending = false, filterLfoLockPending = false;
+    double hostBpm = 120.0, hostExpectedPpq = 0.0;
+    bool   hostWasPlaying = false;
+    double lfoSampleRate = 48000.0;
+    void applyLfoSync(daisysp::Oscillator& lfo, double& stored, bool& lockPending, float rateKnob, double beats) {
+        stored = beats > 0.0 ? beats : 0.0;
+        if (stored > 0.0) { lfo.SetFreq((float)(hostBpm / 60.0 / stored)); lockPending = true; }
+        else { lfo.SetFreq(.14f * powf(65.41f / .14f, rateKnob)); lockPending = false; } // back to the knob's rate
+    }
+    static void lockLfoToPpq(daisysp::Oscillator& lfo, double beats, double ppq) {
+        if (beats <= 0.0) return;
+        double ph = ppq / beats;
+        ph -= std::floor(ph);
+        lfo.Reset((float)(ph * TWOPI_F));
+    }
     float final_lim_, final_lim_target_;
     bool switch_state;
     float master_cutoff;

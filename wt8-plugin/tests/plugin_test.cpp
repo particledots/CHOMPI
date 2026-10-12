@@ -1,5 +1,6 @@
 // Drives the real WT8 AudioProcessor the way a host would (no GUI, no audio device).
 #include "PluginProcessor.h"
+#include "WT8Engine.h"
 #include "WavetableImport.h"
 #include "filter_golden.h"
 #include "engine/FilterMaps.h"
@@ -11,6 +12,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <functional>
 #include <memory>
 #include <thread>
 #include <tuple>
@@ -1872,6 +1874,247 @@ int main()
         printf("v0.23 Sample & hold LFO: %s\n", v23Ok ? "ok" : "FAILED");
     }
 
+    // ---- v0.24: tempo-synced LFO rate (a mock Logic: tempo, position, playing) ----
+    bool v24Ok = true;
+    {
+        auto check = [&](bool cond, const char* what) { printf("  %s: %s\n", cond ? "ok  " : "FAIL", what); v24Ok = v24Ok && cond; };
+        auto makeProc = [&]() { auto pr = std::make_unique<WT8AudioProcessor>(); pr->setPlayConfigDetails(0, 2, sr, bs); pr->prepareToPlay(sr, bs); return pr; };
+        auto setN = [&](WT8AudioProcessor& pr, const char* id, float real) { auto* q = pr.apvts.getParameter(id); q->setValueNotifyingHost(q->convertTo0to1(real)); };
+        auto getN = [&](WT8AudioProcessor& pr, const char* id) { return pr.apvts.getRawParameterValue(id)->load(); };
+
+        struct MockHost : juce::AudioPlayHead
+        {
+            double bpm = 120.0, ppq = 0.0; bool playing = true, haveBpm = true, havePpq = true;
+            juce::Optional<PositionInfo> getPosition() const override
+            {
+                PositionInfo pi; if (haveBpm) pi.setBpm(bpm); if (havePpq) pi.setPpqPosition(ppq); pi.setIsPlaying(playing); return pi;
+            }
+        };
+        struct Run { std::vector<float> out; std::vector<double> blockPpq; bool fin = true; };
+        using Hook = std::function<void(int, MockHost&, WT8AudioProcessor&)>;
+        // One held high note (MIDI 96) with the PITCH LFO set to Square at full depth: each half cycle of the LFO is a clear step in pitch
+        // (+2 / -2 semitones), so the steps show where the LFO's cycle boundaries are. sync = index of the pitch LFO sync box.
+        auto render = [&](double bpm, bool playing, double startPpq, int sync, int blocks, const Hook& hook = Hook(), float rateKnob = 0.45f) {
+            Run r; auto pr = makeProc(); MockHost host; host.bpm = bpm; host.playing = playing; host.ppq = startPpq; pr->setPlayHead(&host);
+            setN(*pr, "pitchlfoshape", 4.f); setN(*pr, "pitchlfodepth", 1.f); setN(*pr, "pitchlforate", rateKnob); setN(*pr, "pitchlfosync", (float) sync);
+            juce::AudioBuffer<float> b(2, bs); juce::MidiBuffer m, none; m.addEvent(juce::MidiMessage::noteOn(1, 96, (juce::uint8) 100), 0);
+            for (int blk = 0; blk < blocks; ++blk)
+            {
+                if (hook) hook(blk, host, *pr);
+                r.blockPpq.push_back(host.ppq);
+                b.clear(); pr->processBlock(b, blk == 0 ? m : none);
+                for (int i = 0; i < bs; ++i) { const float v = b.getSample(0, i); if (!std::isfinite(v)) r.fin = false; r.out.push_back(v); }
+                if (host.playing) host.ppq += bs * host.bpm / 60.0 / sr;
+            }
+            pr->setPlayHead(nullptr);
+            return r;
+        };
+        // pitch steps: upward zero crossings per 5 ms window; a window is "high" or "low"; an edge = where it changes (accurate to about one window)
+        const int win = (int) (sr * 0.005);
+        struct Edge { size_t at; bool up; };
+        auto edgesOf = [&](const std::vector<float>& x, size_t from, bool& contrast) {
+            std::vector<int> cnt;
+            for (size_t s0 = from; s0 + win <= x.size(); s0 += win) { int c = 0; for (size_t i = s0; i < s0 + win; ++i) if (x[i - 1] < 0.f && x[i] >= 0.f) ++c; cnt.push_back(c); }
+            int lo = 1 << 30, hi = 0; for (int c : cnt) { lo = std::min(lo, c); hi = std::max(hi, c); }
+            contrast = hi - lo >= 3;
+            const double thr = 0.5 * (lo + hi);
+            std::vector<Edge> e;
+            for (size_t i = 1; i < cnt.size(); ++i) { const bool a = cnt[i - 1] > thr, c = cnt[i] > thr; if (a != c) e.push_back({from + i * win, c}); }
+            return e;
+        };
+        auto meanInterval = [&](const std::vector<Edge>& e, size_t firstIdx) { // seconds between neighbouring edges, averaged from edge firstIdx on
+            if (e.size() < firstIdx + 2) return -1.0;
+            return (double) (e.back().at - e[firstIdx].at) / (double) (e.size() - 1 - firstIdx) / sr; };
+        auto edgePpq = [&](const Run& r, const Edge& e, double bpm) {
+            size_t b = std::min(e.at / (size_t) bs, r.blockPpq.size() - 1);
+            return r.blockPpq[b] + (double) (e.at - b * (size_t) bs) * bpm / 60.0 / sr; };
+        auto allOnGrid = [&](const Run& r, const std::vector<Edge>& e, size_t firstIdx, double bpm, double halfBeats, double tolBeats) {
+            if (e.size() <= firstIdx) return false;
+            for (size_t i = firstIdx; i < e.size(); ++i) { const double q = edgePpq(r, e[i], bpm) / halfBeats; if (std::fabs(q - std::round(q)) * halfBeats > tolBeats) return false; }
+            return true; };
+        const size_t skip = (size_t) (sr * 0.05); // the attack
+
+        // names and lengths of the choices (an independent table, so a shuffled list is caught)
+        {
+            auto pr = makeProc();
+            auto* ps = dynamic_cast<juce::AudioParameterChoice*>(pr->apvts.getParameter("pitchlfosync"));
+            auto* fs = dynamic_cast<juce::AudioParameterChoice*>(pr->apvts.getParameter("filterlfosync"));
+            check(ps != nullptr && fs != nullptr && ps->choices.size() == WT8Engine::kNumLfoSyncs && fs->choices.size() == WT8Engine::kNumLfoSyncs && ps->choices[0] == "Free rate",
+                  "both LFOs have a sync box with 15 choices, the first is Free rate");
+            check(getN(*pr, "pitchlfosync") == 0.f && getN(*pr, "filterlfosync") == 0.f, "both sync boxes default to Free rate (= the LFOs as they always were)");
+            const std::pair<const char*, double> expect[] = {{"Sync 8 bars", 32}, {"Sync 4 bars", 16}, {"Sync 2 bars", 8}, {"Sync 1 bar", 4}, {"Sync 1/2", 2}, {"Sync 1/4 dot", 1.5},
+                {"Sync 1/4", 1}, {"Sync 1/4T", 2.0 / 3}, {"Sync 1/8 dot", 0.75}, {"Sync 1/8", 0.5}, {"Sync 1/8T", 1.0 / 3}, {"Sync 1/16", 0.25}, {"Sync 1/16T", 1.0 / 6}, {"Sync 1/32", 0.125}};
+            bool all = true; int seen = 0;
+            for (int i = 1; i < WT8Engine::kNumLfoSyncs; ++i)
+                for (auto& e : expect) if (std::string(WT8Engine::lfoSyncName(i)) == e.first) { ++seen; if (std::fabs(WT8Engine::lfoSyncBeats(i) - e.second) > 1e-9) all = false; }
+            check(all && seen == 14 && WT8Engine::lfoSyncBeats(0) == 0.0, "every division's name matches its length in quarter notes (8 bars = 32 ... 1/32 = 0.125)");
+        }
+
+        // the free rate is not touched by the host: tempo and transport make no difference at all (and old projects are unchanged)
+        {
+            auto a = render(120.0, true, 0.0, 0, 60), c = render(60.0, true, 3.7, 0, 60), d = render(120.0, false, 0.0, 0, 60);
+            float d1 = 0, d2 = 0; for (size_t i = 0; i < a.out.size(); ++i) { d1 = std::fmax(d1, std::fabs(a.out[i] - c.out[i])); d2 = std::fmax(d2, std::fabs(a.out[i] - d.out[i])); }
+            check(a.fin && d1 == 0.f && d2 == 0.f, "Free rate: a different tempo, position or a stopped host changes nothing (bit-identical)");
+        }
+        // no host at all (standalone): finite, and a synced LFO then runs at 120 bpm
+        {
+            Run r; auto pr = makeProc(); setN(*pr, "pitchlfoshape", 4.f); setN(*pr, "pitchlfodepth", 1.f); setN(*pr, "pitchlfosync", 7.f);
+            juce::AudioBuffer<float> b(2, bs); juce::MidiBuffer m, none; m.addEvent(juce::MidiMessage::noteOn(1, 96, (juce::uint8) 100), 0);
+            for (int blk = 0; blk < 172; ++blk) { b.clear(); pr->processBlock(b, blk == 0 ? m : none); for (int i = 0; i < bs; ++i) { r.out.push_back(b.getSample(0, i)); if (!std::isfinite(r.out.back())) r.fin = false; } }
+            bool ct = false; auto e = edgesOf(r.out, skip, ct); const double mi = meanInterval(e, 0);
+            check(r.fin && ct && mi > 0.2425 && mi < 0.2575, "no host: a synced LFO (1/4) runs at 120 bpm (a step every 0.25 s)");
+        }
+
+        // rates: the time between pitch steps = half an LFO cycle = beats / 2 quarter notes at the host tempo
+        struct RateCase { int sync; double bpm; double beats; int blocks; };
+        for (const RateCase rc : {RateCase{7, 120.0, 1.0, 172}, RateCase{7, 60.0, 1.0, 345}, RateCase{4, 120.0, 4.0, 400}, RateCase{11, 120.0, 1.0 / 3, 172}, RateCase{12, 100.0, 0.25, 172}, RateCase{7, 180.0, 1.0, 172}})
+        {
+            auto r = render(rc.bpm, true, 0.0, rc.sync, rc.blocks);
+            bool ct = false; auto e = edgesOf(r.out, skip, ct);
+            const double want = rc.beats / 2.0 * 60.0 / rc.bpm, got = meanInterval(e, 0);
+            char what[160]; snprintf(what, sizeof what, "%s at %.0f bpm: a pitch step every %.4f s (measured %.4f s, %zu steps)", WT8Engine::lfoSyncName(rc.sync), rc.bpm, want, got, e.size());
+            check(r.fin && ct && e.size() >= 4 && std::fabs(got - want) <= 0.04 * want, what);
+        }
+        // the RATE knob has no effect while synced: not at the start, and not when it is moved while the LFO is running
+        { auto a = render(120.0, true, 0.0, 7, 80, Hook(), 0.1f), c = render(120.0, true, 0.0, 7, 80, Hook(), 0.9f),
+               m = render(120.0, true, 0.0, 7, 80, [](int blk, MockHost&, WT8AudioProcessor& p) { if (blk == 30) { auto* q = p.apvts.getParameter("pitchlforate"); q->setValueNotifyingHost(0.9f); } }, 0.1f);
+          float d = 0, d2 = 0; for (size_t i = 0; i < a.out.size(); ++i) { d = std::fmax(d, std::fabs(a.out[i] - c.out[i])); d2 = std::fmax(d2, std::fabs(a.out[i] - m.out[i])); }
+          check(d == 0.f, "synced: the RATE knob makes no difference (bit-identical at 10 % and 90 %)");
+          check(d2 == 0.f, "synced: moving the RATE knob while the LFO runs makes no difference either (bit-identical)"); }
+
+        // lock to the host's position: playing from beat 0.8 of a 1-beat cycle (the second half, low) -> the first step up comes 0.2 beat = 0.1 s later
+        {
+            auto r = render(120.0, true, 0.8, 7, 172); bool ct = false; auto e = edgesOf(r.out, skip, ct);
+            const double t0 = e.empty() ? -1.0 : (double) e[0].at / sr;
+            check(ct && !e.empty() && e[0].up && std::fabs(t0 - 0.1) <= 0.015, "playing from beat 0.8: the first step is UP after 0.1 s (the LFO starts where the host is, not at its own phase 0)");
+            check(allOnGrid(r, e, 0, 120.0, 0.5, 0.03), "...and every step sits on the half-cycle grid of the host position (within 0.03 beat)");
+        }
+        // a relocation (the host jumps to beat 0.8 after 0.6 s) locks again; without that the next step would come at 0.147 s, not 0.1 s
+        {
+            auto r = render(120.0, true, 0.0, 7, 172, [](int blk, MockHost& h, WT8AudioProcessor&) { if (blk == 52) h.ppq = 0.8; });
+            bool ct = false; auto e = edgesOf(r.out, skip, ct);
+            const size_t jumpAt = 52 * (size_t) bs; double firstAfter = -1.0; bool up = false; std::vector<Edge> after;
+            for (auto& x : e) if (x.at > jumpAt + (size_t) (sr * 0.03)) { if (firstAfter < 0) { firstAfter = (double) (x.at - jumpAt) / sr; up = x.up; } after.push_back(x); }
+            check(ct && firstAfter > 0 && up && std::fabs(firstAfter - 0.1) <= 0.018, "a relocation to beat 0.8: the first step after it is UP 0.1 s later (locked again to the new position)");
+            check(allOnGrid(r, after, 0, 120.0, 0.5, 0.03), "...and the steps after the relocation sit on the grid of the new position");
+        }
+        // playback starting after a stop: stopped (free-running at the tempo), then the host plays from beat 0.8
+        {
+            auto r = render(120.0, false, 0.8, 7, 172, [](int blk, MockHost& h, WT8AudioProcessor&) { if (blk == 40) h.playing = true; });
+            bool ct = false; auto e = edgesOf(r.out, skip, ct);
+            const size_t startAt = 40 * (size_t) bs; double firstAfter = -1.0; bool up = false; std::vector<Edge> after;
+            for (auto& x : e) if (x.at > startAt + (size_t) (sr * 0.03)) { if (firstAfter < 0) { firstAfter = (double) (x.at - startAt) / sr; up = x.up; } after.push_back(x); }
+            check(ct && firstAfter > 0 && up && std::fabs(firstAfter - 0.1) <= 0.018 && allOnGrid(r, after, 0, 120.0, 0.5, 0.03),
+                  "starting playback from beat 0.8: the LFO locks to the host position at that moment (first step UP after 0.1 s, then on the grid)");
+        }
+        // stopped host: runs at the tempo
+        { auto r = render(120.0, false, 0.0, 7, 172); bool ct = false; auto e = edgesOf(r.out, skip, ct); const double mi = meanInterval(e, 0);
+          check(ct && e.size() >= 4 && std::fabs(mi - 0.25) <= 0.01, "host stopped: the synced LFO keeps running at the tempo (a step every 0.25 s)"); }
+        // switching the box to a division while the host plays snaps the LFO to the grid
+        {
+            auto r = render(120.0, true, 0.3, 0, 200, [](int blk, MockHost&, WT8AudioProcessor& p) { if (blk == 40) { auto* q = p.apvts.getParameter("pitchlfosync"); q->setValueNotifyingHost(q->convertTo0to1(7.f)); } });
+            bool ct = false; auto e = edgesOf(r.out, skip, ct); std::vector<Edge> after;
+            for (auto& x : e) if (x.at > 40 * (size_t) bs + (size_t) (sr * 0.03)) after.push_back(x);
+            check(ct && after.size() >= 3 && allOnGrid(r, after, 0, 120.0, 0.5, 0.03), "choosing a division while the host plays: the steps then sit on the host's grid");
+        }
+        // back to Free: the LFO returns to the RATE knob's rate (0.45 -> 2.23 Hz: a step every 0.2245 s), not the division's
+        {
+            auto r = render(120.0, true, 0.0, 7, 260, [](int blk, MockHost&, WT8AudioProcessor& p) { if (blk == 40) { auto* q = p.apvts.getParameter("pitchlfosync"); q->setValueNotifyingHost(q->convertTo0to1(0.f)); } });
+            bool ct = false; auto e = edgesOf(r.out, skip, ct); std::vector<Edge> after;
+            for (auto& x : e) if (x.at > 45 * (size_t) bs) after.push_back(x);
+            const double mi = meanInterval(after, 0);
+            check(ct && after.size() >= 5 && std::fabs(mi - 0.2245) <= 0.01, "set back to Free rate: the LFO runs at the knob's rate again (a step every 0.2245 s)");
+        }
+        // a tempo change while playing retunes the LFO (120 -> 60 bpm after 1 s: steps 0.25 s apart, then 0.5 s apart)
+        {
+            auto r = render(120.0, true, 0.0, 7, 460, [](int blk, MockHost& h, WT8AudioProcessor&) { if (blk == 86) h.bpm = 60.0; });
+            bool ct = false; auto e = edgesOf(r.out, skip, ct); std::vector<Edge> early, late;
+            for (auto& x : e) { if (x.at < 80 * (size_t) bs) early.push_back(x); else if (x.at > 100 * (size_t) bs) late.push_back(x); }
+            const double m1 = meanInterval(early, 0), m2 = meanInterval(late, 0);
+            check(ct && early.size() >= 3 && late.size() >= 3 && std::fabs(m1 - 0.25) <= 0.012 && std::fabs(m2 - 0.5) <= 0.02, "a tempo change while playing: 0.25 s between steps at 120 bpm, 0.5 s at 60 bpm");
+        }
+        // the filter LFO has its own box (the pitch LFO is untouched by it)
+        {
+            auto a = render(120.0, true, 0.0, 7, 80);
+            Run r2; auto pr = makeProc(); MockHost host; pr->setPlayHead(&host);
+            setN(*pr, "pitchlfoshape", 4.f); setN(*pr, "pitchlfodepth", 1.f); setN(*pr, "pitchlforate", 0.45f); setN(*pr, "pitchlfosync", 7.f);
+            setN(*pr, "filterlfosync", 12.f); // filter LFO synced too, depth 0: no sound change
+            juce::AudioBuffer<float> b(2, bs); juce::MidiBuffer m, none; m.addEvent(juce::MidiMessage::noteOn(1, 96, (juce::uint8) 100), 0);
+            for (int blk = 0; blk < 80; ++blk) { b.clear(); pr->processBlock(b, blk == 0 ? m : none); for (int i = 0; i < bs; ++i) r2.out.push_back(b.getSample(0, i)); host.ppq += bs * host.bpm / 60.0 / sr; }
+            pr->setPlayHead(nullptr);
+            float d = 0; for (size_t i = 0; i < a.out.size(); ++i) d = std::fmax(d, std::fabs(a.out[i] - r2.out[i]));
+            check(d == 0.f, "the filter LFO's sync box (depth 0) leaves a synced pitch LFO bit-identical");
+        }
+        // the FILTER LFO's own box: a Square filter LFO (depth 1) on a low-pass filter steps the brightness; steps every half cycle, locked to the host
+        {
+            auto renderF = [&](double bpm, double startPpq, int sync, int blocks) {
+                Run r; auto pr = makeProc(); MockHost host; host.bpm = bpm; host.ppq = startPpq; pr->setPlayHead(&host);
+                setN(*pr, "filterlfoshape", 4.f); setN(*pr, "filterlfodepth", 1.f); setN(*pr, "filterlforate", 0.45f); setN(*pr, "filterlfosync", (float) sync);
+                setN(*pr, "filtertype", 1.f); setN(*pr, "cutoff", 0.35f);
+                juce::AudioBuffer<float> b(2, bs); juce::MidiBuffer m, none; m.addEvent(juce::MidiMessage::noteOn(1, 57, (juce::uint8) 100), 0);
+                for (int blk = 0; blk < blocks; ++blk)
+                {
+                    r.blockPpq.push_back(host.ppq);
+                    b.clear(); pr->processBlock(b, blk == 0 ? m : none);
+                    for (int i = 0; i < bs; ++i) { const float v = b.getSample(0, i); if (!std::isfinite(v)) r.fin = false; r.out.push_back(v); }
+                    host.ppq += bs * host.bpm / 60.0 / sr;
+                }
+                pr->setPlayHead(nullptr);
+                return r;
+            };
+            const int fw = (int) (sr * 0.02); // 20 ms rms windows
+            auto levelEdges = [&](const std::vector<float>& x, bool& contrast) {
+                std::vector<double> lv;
+                for (size_t s0 = skip; s0 + fw <= x.size(); s0 += fw) { double a = 0; for (size_t i = s0; i < s0 + fw; ++i) a += (double) x[i] * x[i]; lv.push_back(std::sqrt(a / fw)); }
+                double lo = 1e30, hi = 0; for (double v : lv) { lo = std::fmin(lo, v); hi = std::fmax(hi, v); }
+                contrast = hi > 1.5 * lo;
+                const double thr = 0.5 * (lo + hi);
+                std::vector<Edge> e;
+                for (size_t i = 1; i < lv.size(); ++i) { const bool a = lv[i - 1] > thr, c = lv[i] > thr; if (a != c) e.push_back({skip + i * (size_t) fw, c}); }
+                return e;
+            };
+            { auto r = renderF(120.0, 0.0, 7, 172); bool ct = false; auto e = levelEdges(r.out, ct); const double mi = meanInterval(e, 0);
+              check(r.fin && ct && e.size() >= 4 && std::fabs(mi - 0.25) <= 0.012, "filter LFO, Sync 1/4 at 120 bpm: a brightness step every 0.25 s"); }
+            { auto r = renderF(120.0, 0.8, 7, 172); bool ct = false; auto e = levelEdges(r.out, ct); const double t0 = e.empty() ? -1.0 : (double) e[0].at / sr;
+              check(ct && !e.empty() && e[0].up && std::fabs(t0 - 0.1) <= 0.025 && allOnGrid(r, e, 0, 120.0, 0.5, 0.06),
+                    "filter LFO, playing from beat 0.8: the first brightness step is UP after about 0.1 s, then every step sits on the host's grid"); }
+        }
+        // saved with the project; a project from before v0.24 comes back on Free rate
+        {
+            auto src = makeProc(); setN(*src, "pitchlfosync", 7.f); setN(*src, "filterlfosync", 12.f);
+            juce::MemoryBlock saved; src->getStateInformation(saved);
+            auto dst = makeProc(); setN(*dst, "pitchlfosync", 3.f); dst->setStateInformation(saved.getData(), (int) saved.getSize());
+            check(getN(*dst, "pitchlfosync") == 7.f && getN(*dst, "filterlfosync") == 12.f, "the two sync settings are saved with the project");
+            auto xml = juce::AudioProcessor::getXmlFromBinary(saved.getData(), (int) saved.getSize());
+            for (auto* id : {"pitchlfosync", "filterlfosync"}) while (auto* ch = xml->getChildByAttribute("id", id)) xml->removeChildElement(ch, true);
+            juce::MemoryBlock oldState; juce::AudioProcessor::copyXmlToBinary(*xml, oldState);
+            auto target = makeProc(); setN(*target, "pitchlfosync", 5.f); setN(*target, "filterlfosync", 5.f);
+            target->setStateInformation(oldState.getData(), (int) oldState.getSize());
+            check(getN(*target, "pitchlfosync") == 0.f && getN(*target, "filterlfosync") == 0.f, "a project from before v0.24: both LFOs are on Free rate");
+        }
+        // robustness: sample and hold on both LFOs, sync switched around while playing, extreme tempi and wild position jumps: finite and bounded
+        for (double bpm : {20.0, 300.0})
+        {
+            auto pr = makeProc(); MockHost host; host.bpm = bpm; pr->setPlayHead(&host);
+            setN(*pr, "pitchlfoshape", 5.f); setN(*pr, "filterlfoshape", 5.f); setN(*pr, "pitchlfodepth", 1.f); setN(*pr, "filterlfodepth", 1.f);
+            juce::AudioBuffer<float> b(2, bs); juce::MidiBuffer m, none; m.addEvent(juce::MidiMessage::noteOn(1, 60, (juce::uint8) 100), 0);
+            bool fin = true; float pk = 0;
+            for (int blk = 0; blk < 500; ++blk)
+            {
+                if (blk % 11 == 0) { setN(*pr, "pitchlfosync", (float) (blk / 11 % 15)); setN(*pr, "filterlfosync", (float) ((blk / 11 * 4 + 3) % 15)); }
+                if (blk % 37 == 0) host.ppq = (blk * 7) % 53 - 5.0;          // a jump, now and then to before beat 0
+                host.playing = blk % 90 < 70; host.havePpq = blk % 130 < 100; // transport stops and starts, and sometimes there is no position
+                b.clear(); pr->processBlock(b, blk == 0 ? m : none);
+                for (int i = 0; i < bs; ++i) { const float v = b.getSample(0, i); if (!std::isfinite(v)) fin = false; pk = std::fmax(pk, std::fabs(v)); }
+                if (host.playing) host.ppq += bs * host.bpm / 60.0 / sr;
+            }
+            pr->setPlayHead(nullptr);
+            char what[160]; snprintf(what, sizeof what, "%.0f bpm, sample & hold on both, sync boxes switched about, position jumps, transport stops/starts: finite and bounded", bpm);
+            check(fin && pk < 4.f, what);
+        }
+        printf("v0.24 tempo-synced LFO rate: %s\n", v24Ok ? "ok" : "FAILED");
+    }
+
     // ---- v0.18: the step view (GRID / RING / 2 RINGS) is saved with the project ----
     bool v18Ok = true;
     {
@@ -2126,7 +2369,7 @@ int main()
         printf("v0.19 filter: %s\n", v19Ok ? "ok" : "FAILED");
     }
 
-    bool ok = seqOk && v4Ok && v5Ok && v6Ok && v8Ok && v9Ok && v10Ok && v13Ok && v14Ok && v16Ok && v17Ok && v23Ok && v18Ok && v19Ok && finite && peak > 0.02f && peak <= 1.5f && held > 0.005f && tail < held * 0.05f && std::fabs(cutoff - 0.2f) < 0.01f;
+    bool ok = seqOk && v4Ok && v5Ok && v6Ok && v8Ok && v9Ok && v10Ok && v13Ok && v14Ok && v16Ok && v17Ok && v23Ok && v24Ok && v18Ok && v19Ok && finite && peak > 0.02f && peak <= 1.5f && held > 0.005f && tail < held * 0.05f && std::fabs(cutoff - 0.2f) < 0.01f;
     printf(ok ? "PASS\n" : "FAIL\n");
     return ok ? 0 : 1;
 }

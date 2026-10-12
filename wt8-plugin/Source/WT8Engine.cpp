@@ -5,6 +5,7 @@
 #include "daisysp.h"
 #include "subtractiveEngine.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -84,6 +85,8 @@ struct WT8Engine::Impl
         if (changed(p.filterLfoRate, applied.filterLfoRate)) engine->setLfoRate(p.filterLfoRate);
         if (changed(p.pitchLfoShape, applied.pitchLfoShape))   engine->setPitchLfoShape(p.pitchLfoShape);
         if (changed(p.filterLfoShape, applied.filterLfoShape)) engine->setFilterLfoShape(p.filterLfoShape);
+        if (changed(p.pitchLfoSync, applied.pitchLfoSync))     engine->setPitchLfoSyncBeats(WT8Engine::lfoSyncBeats(p.pitchLfoSync));
+        if (changed(p.filterLfoSync, applied.filterLfoSync))   engine->setFilterLfoSyncBeats(WT8Engine::lfoSyncBeats(p.filterLfoSync));
         if (changed(p.filterType, applied.filterType))         engine->setFilterType(p.filterType);
         if (changed(p.filterKey, applied.filterKey))           engine->setFilterKeyTrack(p.filterKey);
         if (changed(p.filterVel, applied.filterVel))           engine->setFilterVelocity(p.filterVel);
@@ -176,6 +179,28 @@ void WT8Engine::setParams(const Params& p)
         impl_->ensureInit(); // Init() applies impl_->params itself
     else
         impl_->applyAll(p, false);
+}
+
+void WT8Engine::setHostTiming(double bpm, bool playing, bool havePpq, double ppq, int numSamples)
+{
+    impl_->ensureInit();
+    impl_->engine->setHostTiming(bpm, playing, havePpq, ppq, numSamples);
+}
+
+const char* WT8Engine::lfoSyncName(int sync)
+{
+    static const char* n[kNumLfoSyncs] = {"Free rate",    "Sync 8 bars",  "Sync 4 bars",  "Sync 2 bars",  "Sync 1 bar",
+                                          "Sync 1/2",     "Sync 1/4 dot", "Sync 1/4",     "Sync 1/4T",    "Sync 1/8 dot",
+                                          "Sync 1/8",     "Sync 1/8T",    "Sync 1/16",    "Sync 1/16T",   "Sync 1/32"};
+    return n[std::max(0, std::min(kNumLfoSyncs - 1, sync))];
+}
+
+double WT8Engine::lfoSyncBeats(int sync)
+{
+    // quarter notes per LFO cycle, in the order of lfoSyncName()
+    static const double v[kNumLfoSyncs] = {0.0,  32.0, 16.0, 8.0,  4.0,       2.0,       1.5,   1.0,
+                                           2.0 / 3.0, 0.75, 0.5, 1.0 / 3.0, 0.25, 1.0 / 6.0, 0.125};
+    return v[std::max(0, std::min(kNumLfoSyncs - 1, sync))];
 }
 
 void WT8Engine::noteOn(int midiNote, int midiVelocity, bool fromSequencer)

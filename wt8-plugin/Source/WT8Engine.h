@@ -34,6 +34,8 @@ class WT8Engine
         float filterLfoRate  = 0.58f; // 0..1
         int   pitchLfoShape  = 0;     // v0.17: 0 triangle (as before), 1 sine, 2 saw down, 3 saw up, 4 square; v0.23: 5 sample and hold
         int   filterLfoShape = 0;     // v0.17: same
+        int   pitchLfoSync   = 0;     // v0.24: 0 = free (the RATE knob), 1..kNumLfoSyncs-1 = tempo-synced, see lfoSyncName()
+        int   filterLfoSync  = 0;     // v0.24: same
         int   filterType     = 0;     // v0.19: 0 DJ (as always), 1 low-pass, 2 high-pass, 3 band-pass
         float filterKey      = 0.f;   // v0.19: 0..1, how much the cutoff follows the note's pitch (0 = off)
         float filterVel      = 0.f;   // v0.19: 0..1, how much a softer note darkens the filter (0 = off)
@@ -44,6 +46,12 @@ class WT8Engine
         float comp           = 0.f;   // 0..1  (<.5 compressor, >.5 saturation)
         float outputDb       = 20.f;  // plugin-only makeup gain, see notes in the README
     };
+
+    /** v0.24 tempo-synced LFO rate: the choices of the two sync controls. 0 = free (the RATE knob decides, as before); the others are
+     *  the length of ONE LFO cycle, from 8 bars down to a 32nd note (dotted and triplet values included). */
+    static constexpr int kNumLfoSyncs = 15;
+    static const char* lfoSyncName(int sync);
+    static double lfoSyncBeats(int sync); // length of one cycle in quarter notes; 0 for 0 (free)
 
     explicit WT8Engine(double sampleRate);
     ~WT8Engine();
@@ -57,6 +65,11 @@ class WT8Engine
     bool setTableData(int index, const float* data, size_t numFloats);
 
     void setParams(const Params& p);
+
+    /** v0.24: once per block, BEFORE rendering it: the host's tempo (<= 0 = unknown, 120 is used), whether it is playing, its position in
+     *  quarter notes at the start of the block (when havePpq) and the block length. Tempo-synced LFOs follow the tempo, and are locked to
+     *  the host position while it plays. Does nothing for LFOs that are free. */
+    void setHostTiming(double bpm, bool playing, bool havePpq, double ppq, int numSamples);
 
     // `fromSequencer` keeps sequencer notes separate from played ones, as in the firmware: a key is only
     // released once both sources have let go of it.

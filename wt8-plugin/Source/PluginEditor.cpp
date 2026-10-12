@@ -833,6 +833,12 @@ WT8Editor::WT8Editor(WT8AudioProcessor& p) : juce::AudioProcessorEditor(&p), pro
         pitchShapeAtt_ = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(proc_.apvts, "pitchlfoshape", pitchShapeBox_);
     if (proc_.apvts.getParameter("filterlfoshape") != nullptr)
         filterShapeAtt_ = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(proc_.apvts, "filterlfoshape", filterShapeBox_);
+    fillCombo(pitchSyncBox_, "pitchlfosync");
+    fillCombo(filterSyncBox_, "filterlfosync");
+    if (proc_.apvts.getParameter("pitchlfosync") != nullptr)
+        pitchSyncAtt_ = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(proc_.apvts, "pitchlfosync", pitchSyncBox_);
+    if (proc_.apvts.getParameter("filterlfosync") != nullptr)
+        filterSyncAtt_ = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(proc_.apvts, "filterlfosync", filterSyncBox_);
     octAtt_ = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(proc_.apvts, "seq_octmode", octBox_);
     scaleAtt_ = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(proc_.apvts, "seq_scale", scaleBox_);
     rootAtt_ = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(proc_.apvts, "seq_root", rootBox_);
@@ -998,7 +1004,7 @@ WT8Editor::WT8Editor(WT8AudioProcessor& p) : juce::AudioProcessorEditor(&p), pro
     for (auto* grp : {&row1_, &row2_})
         for (auto& g : *grp)
             for (auto* k : g.knobs) { k->slider.setVisible(false); k->name.setVisible(false); }
-    for (juce::Component* c : std::initializer_list<juce::Component*>{&tableView_, &loadTableBtn_, &resetTableBtn_, &filterTypeBox_, &pitchShapeBox_, &filterShapeBox_,
+    for (juce::Component* c : std::initializer_list<juce::Component*>{&tableView_, &loadTableBtn_, &resetTableBtn_, &filterTypeBox_, &pitchShapeBox_, &filterShapeBox_, &pitchSyncBox_, &filterSyncBox_,
                                                                        &presetBox_, &presetPrevBtn_, &presetNextBtn_, &presetSaveBtn_, &presetFolderBtn_})
         c->setVisible(false);
 #endif
@@ -1024,6 +1030,14 @@ void WT8Editor::timerCallback()
     retrigBtn_.setEnabled(syncBox_.getSelectedItemIndex() == 0); // v0.13: like PLAY, a Free-sync control (in Logic sync the bar decides where step 1 is)
     if (loopEndBtn_.getToggleState() != proc_.getSlotAtLoopEnd()) loopEndBtn_.setToggleState(proc_.getSlotAtLoopEnd(), juce::dontSendNotification); // a project was opened
     pendBtn_.setEnabled(dirBox_.getSelectedItemIndex() == 2);  // end-repeat only applies to the pendulum
+    // v0.24: while an LFO is tempo-synced its RATE knob has no effect (the knob keeps its value for when it is set back to Free), so show it dimmed
+    if (lfoKnobs_[1] != nullptr && lfoKnobs_[3] != nullptr)
+    {
+        auto* ps = proc_.apvts.getRawParameterValue("pitchlfosync");
+        auto* fs = proc_.apvts.getRawParameterValue("filterlfosync");
+        if (ps != nullptr) lfoKnobs_[1]->slider.setAlpha(ps->load() > 0.5f ? 0.4f : 1.0f);
+        if (fs != nullptr) lfoKnobs_[3]->slider.setAlpha(fs->load() > 0.5f ? 0.4f : 1.0f);
+    }
 
     refreshSlotButtons();
     refreshChainControls();
@@ -1520,16 +1534,19 @@ void WT8Editor::resized()
     // v0.17: the LFO shape boxes sit under the knob pairs (the four knobs give up the bottom strip)
     if (!WT8_MIDI_FX && lfoKnobs_[0] != nullptr)
     {
-        juce::Rectangle<int> strips[4];
+        juce::Rectangle<int> strips[4], syncStrips[4]; // v0.24: a second strip under the first (the sync box)
         for (int n = 0; n < 4; ++n)
         {
             auto b = lfoKnobs_[n]->slider.getBounds();
+            syncStrips[n] = b.removeFromBottom(int(28 * scale));
             strips[n] = b.removeFromBottom(int(28 * scale));
             lfoKnobs_[n]->slider.setBounds(b);
         }
         const int pad = int(6 * scale);
         pitchShapeBox_.setBounds(strips[0].getUnion(strips[1]).reduced(pad, int(2 * scale)));
         filterShapeBox_.setBounds(strips[2].getUnion(strips[3]).reduced(pad, int(2 * scale)));
+        pitchSyncBox_.setBounds(syncStrips[0].getUnion(syncStrips[1]).reduced(pad, int(2 * scale)));
+        filterSyncBox_.setBounds(syncStrips[2].getUnion(syncStrips[3]).reduced(pad, int(2 * scale)));
     }
 
     // ---- sequencer strip ----

@@ -105,6 +105,12 @@ juce::AudioProcessorValueTreeState::ParameterLayout WT8AudioProcessor::createLay
     l.add(c("pitchlfoshape", "Pitch LFO Shape", lfoShapes, 0, 5));
     l.add(c("filterlfoshape", "Filter LFO Shape", lfoShapes, 0, 5));
 
+    // v0.24 tempo-synced LFO rate. Version hint 8. Item 0 = "Free rate" (the RATE knob decides, which is what both LFOs always did).
+    juce::StringArray lfoSyncs;
+    for (int n = 0; n < WT8Engine::kNumLfoSyncs; ++n) lfoSyncs.add(WT8Engine::lfoSyncName(n));
+    l.add(c("pitchlfosync", "Pitch LFO Sync", lfoSyncs, 0, 8));
+    l.add(c("filterlfosync", "Filter LFO Sync", lfoSyncs, 0, 8));
+
     // v0.19 filter additions. Version hint 6: added after v0.17 shipped. Defaults (DJ, 0, 0) = the filter as it always was.
     l.add(c("filtertype", "Filter Type", juce::StringArray{"DJ", "Low-pass", "High-pass", "Band-pass"}, 0, 6));
     l.add(f("filterkey", "Filter Key Tracking", 0.f, 1.f, 0.f, 6));
@@ -388,6 +394,8 @@ void WT8AudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
     p.filterLfoRate  = *apvts.getRawParameterValue("filterlforate");
     p.pitchLfoShape  = (int) *apvts.getRawParameterValue("pitchlfoshape");
     p.filterLfoShape = (int) *apvts.getRawParameterValue("filterlfoshape");
+    p.pitchLfoSync   = (int) *apvts.getRawParameterValue("pitchlfosync");
+    p.filterLfoSync  = (int) *apvts.getRawParameterValue("filterlfosync");
     p.filterType     = (int) *apvts.getRawParameterValue("filtertype");
     p.filterKey      = *apvts.getRawParameterValue("filterkey");
     p.filterVel      = *apvts.getRawParameterValue("filtervel");
@@ -398,6 +406,20 @@ void WT8AudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
     p.comp           = *apvts.getRawParameterValue("comp");
     p.outputDb       = *apvts.getRawParameterValue("output");
     engine_->setParams(p);
+
+    // v0.24: the host's tempo and position, for LFOs set to a tempo division (same readout as the sequencer's)
+    {
+        double hostBpm = 0.0, hostPpq = 0.0;
+        bool hostPlaying = false, havePpq = false;
+        if (auto* ph = getPlayHead())
+            if (auto pos = ph->getPosition())
+            {
+                hostPlaying = pos->getIsPlaying();
+                if (auto bpm = pos->getBpm()) hostBpm = *bpm;
+                if (auto ppq = pos->getPpqPosition()) { hostPpq = *ppq; havePpq = true; }
+            }
+        engine_->setHostTiming(hostBpm, hostPlaying, havePpq, hostPpq, numSamples);
+    }
 
     float* left = buffer.getWritePointer(0);
     float* right = buffer.getWritePointer(1);
