@@ -735,7 +735,9 @@ const juce::StringArray& WT8AudioProcessor::presetParameterIds()
                                        "fxtime", "pitchlfodepth", "pitchlforate", "filterlfodepth", "filterlforate", "comp",
                                        // added in v0.21 (a preset file without them gets the defaults = the sound before v0.17)
                                        "pitchlfoshape", "filterlfoshape", "filtertype", "filterkey", "filtervel", "filterenv",
-                                       "filterdecay"};
+                                       "filterdecay",
+                                       // added in v0.26 (a preset file without them gets Free rate = the sound before v0.24)
+                                       "pitchlfosync", "filterlfosync"};
     return ids;
 }
 

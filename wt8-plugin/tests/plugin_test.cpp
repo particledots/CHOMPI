@@ -567,6 +567,31 @@ int main()
                       "v0.21: an older preset file loads the new controls at their defaults (the sound it always had)");
             }
 
+            // v0.26: the two LFO sync choices are part of a preset
+            setPlain(*p, "pitchlfosync", 7.f); setPlain(*p, "filterlfosync", 10.f);
+            check(p->savePreset("Synced Sound", err), "v0.26: save a preset with both LFOs tempo-synced");
+            setPlain(*p, "pitchlfosync", 0.f); setPlain(*p, "filterlfosync", 0.f);
+            check(p->loadPreset("Synced Sound"), "v0.26: load it back");
+            check(getPlain(*p, "pitchlfosync") == 7.f && getPlain(*p, "filterlfosync") == 10.f, "v0.26: both Sync choices come back");
+            check(!p->isPresetModified(), "v0.26: ...and the preset is not marked modified right after loading");
+            setPlain(*p, "pitchlfosync", 3.f);
+            check(p->isPresetModified(), "v0.26: changing a Sync choice marks the preset modified");
+            {
+                auto xmlS = juce::parseXML(folder.getChildFile("Synced Sound.ipmohcpreset"));
+                juce::Array<juce::XmlElement*> drop;
+                for (auto* e : xmlS->getChildWithTagNameIterator("P"))
+                    if (e->getStringAttribute("id") == "pitchlfosync" || e->getStringAttribute("id") == "filterlfosync") drop.add(e);
+                const int nDropped = drop.size();
+                for (auto* e : drop) xmlS->removeChildElement(e, true);
+                check(nDropped == 2 && folder.getChildFile("pre026.ipmohcpreset").replaceWithText(xmlS->toString()), "v0.26 set-up: a preset file without the Sync choices");
+                setPlain(*p, "pitchlfosync", 5.f); setPlain(*p, "filterlfosync", 5.f);
+                p->loadPreset("pre026");
+                check(getPlain(*p, "pitchlfosync") == 0.f && getPlain(*p, "filterlfosync") == 0.f,
+                      "v0.26: an older preset file loads on Free rate (the sound it always had)");
+            }
+            p->loadInitPreset();
+            check(getPlain(*p, "pitchlfosync") == 0.f && getPlain(*p, "filterlfosync") == 0.f, "v0.26: INIT puts both Sync choices on Free rate");
+
             // a file written by another version: a missing parameter -> default, an unknown one is ignored, an out-of-range value is clamped
             auto xml = juce::parseXML(folder.getChildFile(listed + ".ipmohcpreset"));
             bool removed = false;
@@ -595,7 +620,7 @@ int main()
             check(getPlain(*p, "table") == 1.f && near(getPlain(*p, "cutoff"), 0.5f) && near(getPlain(*p, "resonance"), 0.63f) && near(getPlain(*p, "fx"), 0.5f) && near(getPlain(*p, "comp"), 0.f),
                   "INIT puts the sound settings back to their defaults");
             check(near(getPlain(*p, "gain"), 0.55f), "...but leaves GAIN alone");
-            check(WT8AudioProcessor::presetParameterIds().size() == 22, "a preset has 22 parameters (15 + the 7 added in v0.21)");
+            check(WT8AudioProcessor::presetParameterIds().size() == 24, "a preset has 24 parameters (15 + the 7 added in v0.21 + the 2 LFO sync choices added in v0.26)");
             // every id in the list is a real parameter (a typo would silently store nothing)
             bool allReal = true; for (auto& id : WT8AudioProcessor::presetParameterIds()) if (p->apvts.getParameter(id) == nullptr) allReal = false;
             check(allReal, "every parameter a preset names exists");

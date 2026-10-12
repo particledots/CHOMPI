@@ -10,6 +10,7 @@ const juce::Colour kAccent  (0xffe8a33d);
 const juce::Colour kText    (0xffd3d6db);
 const juce::Colour kDim     (0xff7f858f);
 const juce::Colour kValue   (0xffeef0f3); // v0.25: knob values
+const juce::Colour kLabel   (0xffb9bfc9); // v0.26: knob names (kDim was hard to read on the dark panels)
 const juce::Colour kTrack   (0xff3a3d44);
 
 juce::Font makeFont(float height, bool bold = false)
@@ -731,7 +732,7 @@ WT8Editor::Knob& WT8Editor::addKnob(const juce::String& id, const juce::String& 
     auto& n = k->name;
     n.setText(label, juce::dontSendNotification);
     n.setJustificationType(juce::Justification::centred);
-    n.setColour(juce::Label::textColourId, kDim);
+    n.setColour(juce::Label::textColourId, kLabel);
     n.getProperties().set("fontHeight", 11.0f);
     n.setLookAndFeel(&laf_);
     n.setInterceptsMouseClicks(false, false);
@@ -1068,7 +1069,7 @@ void WT8Editor::refreshTableControls()
     {
         shownTableLabel_ = label;
         tableKnob_->name.setText(label, juce::dontSendNotification);
-        tableKnob_->name.setColour(juce::Label::textColourId, user ? kAccent : kDim);
+        tableKnob_->name.setColour(juce::Label::textColourId, user ? kAccent : kLabel);
     }
     resetTableBtn_.setEnabled(user);
 
@@ -1500,7 +1501,7 @@ void WT8Editor::resized()
                 auto cell = inner.withX(inner.getX() + (int) j * cellW).withWidth(cellW);
                 const int labelH = int(14 * scale); // v0.25: name, value and dial are one tight group (value directly under its own name)
                 grp.knobs[j]->name.setBounds(cell.removeFromTop(labelH));
-                grp.knobs[j]->name.getProperties().set("fontHeight", (cellW < int(72 * scale) ? 9.5f : 11.0f) * scale); // v0.19: the narrower cells of the 4-group row get a slightly smaller label
+                grp.knobs[j]->name.getProperties().set("fontHeight", (cellW < int(72 * scale) ? 9.5f : 12.0f) * scale); // v0.26: 12 pt in wide cells (was 11); narrow cells stay 9.5 (10 cut DELAY / REVERB short at 630 px); v0.19: the narrower cells of the 4-group row get a slightly smaller label
                 styleKnobValue(*grp.knobs[j], juce::jmax(48, int(cellW * 0.9f)), scale);
                 grp.knobs[j]->slider.setBounds(cell);
             }
@@ -1575,7 +1576,7 @@ void WT8Editor::resized()
             auto* k = seqKnobs_[n];
             cell.removeFromBottom(int(10 * scale)); // v0.25: a visible gap between one knob group and the next row's name
             k->name.setBounds(cell.removeFromTop(int(14 * scale)));
-            k->name.getProperties().set("fontHeight", 11.0f * scale);
+            k->name.getProperties().set("fontHeight", 12.0f * scale);
             styleKnobValue(*k, int(76 * scale), scale);
             k->slider.setBounds(cell);
         }
