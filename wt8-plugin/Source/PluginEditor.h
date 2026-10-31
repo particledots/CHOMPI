@@ -136,6 +136,16 @@ private:
     int frame_ = 0;
 };
 
+// v0.29: the small pop-over that holds the controls of the "Chance mix" direction (six weights, shortest / longest run).
+// It only draws its own background; the knobs are children placed by WT8Editor::resized().
+class ChancePanel : public juce::Component
+{
+  public:
+    void paint(juce::Graphics&) override;
+    juce::Rectangle<int> dividerBounds; // thin line between the weights and the run lengths
+    float scale = 1.0f;
+};
+
 class WT8Editor : public juce::AudioProcessorEditor, private juce::Timer
 {
   public:
@@ -236,7 +246,14 @@ class WT8Editor : public juce::AudioProcessorEditor, private juce::Timer
     juce::Label syncLabel_, divLabel_, laneLabel_, dirLabel_, scaleLabel_, rootLabel_, octLabel_, xposeReadout_;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> playAtt_, muteAtt_, pendAtt_, xposeAtt_;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> syncAtt_, divAtt_, dirAtt_, scaleAtt_, rootAtt_, octAtt_;
-    std::vector<Knob*> seqKnobs_; // GATE PROB / LOOP SEED / SWING ACCENT (2 columns x 3 rows at the right of the strip)
+    std::vector<Knob*> seqKnobs_; // GATE PROB / LOOP SEED / SWING ACCENT (dotriaconta-tone, v0.29: a strip of three pairs under the panel; IPMOK: 2 columns x 3 rows at the right of the strip)
+    // v0.29: "Chance mix" direction. CHANCE opens the pop-over (only while Direction is Chance mix); DONE or CHANCE closes it.
+    ChancePanel chancePanel_;
+    juce::TextButton chanceBtn_{"CHANCE"}, chanceDoneBtn_{"DONE"};
+    std::vector<Knob*> chanceKnobs_; // six weights (FWD BACK PEND PING RAND DRUNK), then SHORTEST and LONGEST run
+    juce::Rectangle<int> chanceAnchor_; // where resized() wants the pop-over (top left of the row under DIRECTION)
+    void layoutChancePanel();
+    void showChancePanel(bool show);
     juce::Rectangle<int> seqBounds_;
     std::vector<juce::Rectangle<int>> seqDividers_; // v0.15: thin lines between control groups in a sequencer row
     juce::Label rowEditLabel_, rowPlayLabel_;       // v0.15 (six-row layout only): captions for the two new rows

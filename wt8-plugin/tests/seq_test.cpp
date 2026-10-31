@@ -1,6 +1,7 @@
 // Headless timing tests for StepSequencer (no JUCE, no audio).  Run: ./seq_test
 #include "StepSequencer.h"
 #include "RingLayout.h"
+#include "direction_golden.h"
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -651,7 +652,7 @@ int main()
                 if (rnd(0, 2) == 0) q.setCondition(i, rnd(1, 8), rnd(1, 8));
                 if (rnd(0, 2) == 0) q.setProb(i, rnd(0, 100));
             }
-            SeqSettings x; x.play = true; x.division = rnd(0, 7); x.gate = 0.05f + (float) rnd(0, 95) / 100.f; x.loopLen = rnd(0, 6); x.direction = rnd(0, 3);
+            SeqSettings x; x.play = true; x.division = rnd(0, 7); x.gate = 0.05f + (float) rnd(0, 95) / 100.f; x.loopLen = rnd(0, 6); x.direction = rnd(0, 6);
             x.pendRepeat = rnd(0, 1); x.prob = (float) rnd(50, 100) / 100.f; x.seed = rnd(0, 3); x.swing = 50.f + (float) rnd(0, 25);
             x.accent = (float) rnd(0, 100) / 100.f; x.octMode = rnd(0, 5); x.scale = rnd(-1, 27); x.root = rnd(0, 11); x.transpose = rnd(-12, 12);
             const double tempo = rnd(0, 1) ? 300.0 : 90.0; const int bs = rnd(0, 1) ? 8192 : rnd(64, 1500);
@@ -1082,7 +1083,7 @@ int main()
                 StepSequencer s;
                 std::string live0; { StepSequencer t; for (int i = 0, n = 1 + rnd(12); i < n; ++i) { if (rnd(5) == 0) t.addRest(); else t.recordNote(40 + rnd(40), 100); } live0 = t.serialize(); }
                 s.deserialize(live0);
-                SeqSettings c = st; c.direction = rnd(4); c.pendRepeat = rnd(2); c.loopLen = rnd(7); c.division = rnd(8); c.swing = 50.f + rnd(26); c.seed = rnd(2) ? rnd(9) : 0;
+                SeqSettings c = st; c.direction = rnd(7); c.pendRepeat = rnd(2); c.loopLen = rnd(7); c.division = rnd(8); c.swing = 50.f + rnd(26); c.seed = rnd(2) ? rnd(9) : 0;
                 c.gate = 0.1f + 0.1f * rnd(10); c.prob = 0.5f + 0.1f * rnd(6);
                 const bool follow = rnd(3) == 0;
                 std::vector<Ev> all; long long t = 0; double ppq = 0; std::string expectLive = live0; bool stopped = false;
@@ -1401,7 +1402,7 @@ int main()
                 int cur = 0; s.deserialize(model[0]); { std::string tx[16]; for (int i = 0; i < 16; ++i) tx[i] = model[i]; s.setChainBank(tx, cur); }
                 for (int i = 0; i < 16; ++i) s.setChainRepeat(i, 1 + rnd(4));
                 s.setChain(rnd(4) != 0);
-                SeqSettings c = st; c.direction = rnd(4); c.pendRepeat = rnd(2); c.loopLen = rnd(7); c.division = rnd(8); c.swing = 50.f + rnd(26); c.seed = rnd(2) ? rnd(9) : 0;
+                SeqSettings c = st; c.direction = rnd(7); c.pendRepeat = rnd(2); c.loopLen = rnd(7); c.division = rnd(8); c.swing = 50.f + rnd(26); c.seed = rnd(2) ? rnd(9) : 0;
                 c.gate = 0.1f + 0.1f * rnd(10); c.prob = 0.5f + 0.1f * rnd(6);
                 const bool follow = rnd(3) == 0;
                 std::vector<Ev> all; long long t = 0; double ppq = 0; bool stopped = false;
@@ -1464,6 +1465,103 @@ int main()
             }
             printf("  (fuzz: %d runs, %d collections, %d slot changes seen)\n", runs, collects, chainSwaps);
             CHECK(collects > 100, "chain fuzz: swaps were actually exercised (%d)", collects);
+        }
+    }
+
+    printf("T34 new step orders (v0.29): drunk walk, random no-repeat, chance mix\n");
+    {
+        auto idxOf = [](long long k, int L, int dir, uint32_t seed, const ChanceSettings* ch) { return StepSequencer::stepIndexFor(k, L, dir, false, 1, seed, ch); };
+        // (a) the same steps as the recorded output of Unofficial Dub Stab Plaits, for the same SEED and loop length (data only, see direction_golden.h)
+        int cases = 0; long compared = 0;
+        for (const auto& g : kDirectionGolden)
+        {
+            ChanceSettings ch; for (int q = 0; q < 6; ++q) ch.weight[q] = g.w[q]; ch.runMin = g.runMin; ch.runMax = g.runMax;
+            const int N = (int) std::string(g.steps).size(); int bad = 0, first = -1;
+            for (int n = 0; n < N; ++n)
+            {
+                const char c = g.steps[n]; const int want = c <= '9' ? c - '0' : 10 + (c - 'a');
+                if (idxOf(n, g.loop, g.dir, (uint32_t) g.seed, &ch) != want) { if (!bad) first = n; ++bad; }
+            }
+            CHECK(bad == 0, "golden: direction %d seed %d loop %d: %d of %d steps differ (first at %d)", g.dir, g.seed, g.loop, bad, N, first);
+            ++cases; compared += N;
+        }
+        printf("  (golden: %d cases, %ld steps compared)\n", cases, compared);
+        CHECK(cases >= 70, "golden data present (%d cases)", cases);
+
+        // (b) random no-repeat: every round of L steps visits every step exactly once
+        for (int L = 2; L <= 32; ++L)
+            for (uint32_t seed = 1; seed <= 12; ++seed)
+                for (int round = 0; round < 12; ++round)
+                {
+                    unsigned long long seen = 0;
+                    for (int j = 0; j < L; ++j) seen |= 1ULL << idxOf((long long) round * L + j, L, 5, seed, nullptr);
+                    CHECK(seen == ((1ULL << L) - 1), "no-repeat: round %d (loop %d seed %u) does not visit every step once", round, L, seed);
+                }
+        // (c) drunk walk: inside a 256-step stretch every move is one step left, one right or stay
+        for (int L : {3, 8, 16, 32})
+            for (uint32_t seed : {1u, 2u, 50u, 99u})
+                for (long long n = 1; n < 700; ++n)
+                {
+                    if (n % 256 == 0) continue; // a new stretch starts from a fresh position
+                    const int d = (idxOf(n, L, 4, seed, nullptr) - idxOf(n - 1, L, 4, seed, nullptr) + L) % L;
+                    CHECK(d == 0 || d == 1 || d == L - 1, "drunk: jump of %d at step %lld (loop %d seed %u)", d, n, L, seed);
+                }
+        // (d) chance mix with a single weighted order plays only that order
+        {
+            ChanceSettings f; for (int& w : f.weight) w = 0; f.weight[ChanceSettings::Forward] = 100;
+            ChanceSettings b = f; b.weight[0] = 0; b.weight[ChanceSettings::Backward] = 70;
+            ChanceSettings none; for (int& w : none.weight) w = 0; // no weights at all: forward
+            for (long long n = 1; n < 255; ++n)
+            {
+                CHECK(idxOf(n, 11, 6, 3, &f) == (idxOf(n - 1, 11, 6, 3, &f) + 1) % 11, "chance: forward-only run broke at step %lld", n);
+                CHECK(idxOf(n, 11, 6, 3, &b) == (idxOf(n - 1, 11, 6, 3, &b) + 10) % 11, "chance: backward-only run broke at step %lld", n);
+                CHECK(idxOf(n, 11, 6, 3, &none) == (idxOf(n - 1, 11, 6, 3, &none) + 1) % 11, "chance: all weights 0 must play forward (step %lld)", n);
+            }
+        }
+        // (e) always inside the loop, a negative counter counts as 0, loop of 1 is step 0, the older orders are not touched by the new arguments
+        {
+            const ChanceSettings ch;
+            for (int dir = 4; dir <= 6; ++dir)
+            {
+                for (int L : {1, 2, 5, 32}) for (long long n = -3; n < 300; ++n) { const int s = idxOf(n, L, dir, 9, &ch); CHECK(s >= 0 && s < L, "order %d out of range", dir); }
+                CHECK(idxOf(-7, 12, dir, 4, &ch) == idxOf(0, 12, dir, 4, &ch), "order %d: negative counter must count as 0", dir);
+                CHECK(idxOf(5, 1, dir, 4, &ch) == 0, "order %d: loop of 1", dir);
+            }
+            for (long long k = -9; k < 60; ++k) for (int d = 0; d < 4; ++d)
+                CHECK(StepSequencer::stepIndexFor(k, 9, d, d == 2, 12345) == StepSequencer::stepIndexFor(k, 9, d, d == 2, 12345, 77, &ch), "older order %d changed by the new arguments", d);
+            CHECK(StepSequencer::kNumDirections == 7 && std::string(StepSequencer::directionName(3)) == "Random" && std::string(StepSequencer::directionName(6)) == "Chance mix", "direction list");
+            for (int L : {1, 2, 9, 32}) for (int d = 4; d <= 6; ++d)
+                CHECK(StepSequencer::passPeriod(L, d, true) == L && StepSequencer::passIndex(3LL * L, L, d, true) == 3 && StepSequencer::passIndex(3LL * L + L - 1, L, d, true) == 3, "a pass of the new orders is the loop length");
+        }
+        // (f) through the sequencer: the notes are the orders' steps, whatever the block size, and a given SEED plays the same notes in every Logic cycle pass
+        {
+            std::vector<int> pat; for (int i = 0; i < 32; ++i) pat.push_back(60 + i);
+            for (int dir = 4; dir <= 6; ++dir)
+                for (int L : {7, 16, 32})
+                {
+                    SeqSettings d = st; d.direction = dir; d.seed = 5; d.loopLen = L; d.chance.weight[3] = 30; d.chance.weight[5] = 30;
+                    StepSequencer a, b; fill(a, {}); a.clear(); for (int n : pat) a.recordNote(n, 100); b.clear(); for (int n : pat) b.recordNote(n, 100);
+                    const long long steps = 300;
+                    const auto na = onNotes(run(a, d, bpm, sr, 512, steps * step16, false));
+                    const auto nb = onNotes(run(b, d, bpm, sr, 77, steps * step16, false));
+                    CHECK(na == nb, "order %d loop %d: block size changes the notes", dir, L);
+                    bool match = (long long) na.size() == steps;
+                    for (long long n = 0; n < steps && match; ++n) match = na[(size_t) n] == 60 + idxOf(n, L, dir, 5, &d.chance);
+                    CHECK(match, "order %d loop %d: the sequencer does not play the order's steps (%zu notes)", dir, L, na.size());
+                }
+            // Logic cycle: pass 1, jump back to the bar start, pass 2. SEED 5 = the same notes both times; SEED off = fresh notes each pass.
+            for (int dir = 4; dir <= 6; ++dir)
+            {
+                const int L = 32; const long long pass = 32 * step16; // 32 steps = 8 quarter notes = 2 bars at 4/4
+                SeqSettings d = st; d.direction = dir; d.loopLen = L; d.seed = 5;
+                StepSequencer a; a.clear(); for (int n : pat) a.recordNote(n, 100);
+                const auto all = onNotes(run(a, d, bpm, sr, 500, 2 * pass, true, 0.0, {{pass, 0.0}}));
+                const std::vector<int> p1(all.begin(), all.begin() + 32), p2(all.begin() + 32, all.end());
+                CHECK(all.size() == 64 && p1 == p2, "order %d: SEED 5 must play the same notes in every pass of a Logic cycle", dir);
+                d.seed = 0; StepSequencer z; z.clear(); for (int n : pat) z.recordNote(n, 100);
+                const auto fresh = onNotes(run(z, d, bpm, sr, 500, 2 * pass, true, 0.0, {{pass, 0.0}}));
+                CHECK(fresh.size() == 64 && std::vector<int>(fresh.begin(), fresh.begin() + 32) != std::vector<int>(fresh.begin() + 32, fresh.end()), "order %d: SEED off must give fresh notes each pass", dir);
+            }
         }
     }
 

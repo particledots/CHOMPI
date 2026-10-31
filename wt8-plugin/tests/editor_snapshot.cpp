@@ -33,7 +33,7 @@ int main(int argc, char** argv)
     const int totalSteps = argc > 6 ? std::atoi(argv[6]) : 12;
     for (int i = 12; i < totalSteps && i < 32; ++i) { proc.sequencer().recordNote(55 + (i * 7) % 19, 90); proc.sequencer().setProb(i, 35 + (i * 13) % 66); }
     const int loopKnob = argc > 7 ? std::atoi(argv[7]) : 10;
-    set("seq_dir", 2.0f / 3.0f); set("seq_prob", 0.8f); set("seq_loop", loopKnob / 32.0f); set("seq_seed", 0.0f);
+    set("seq_dir", (argc > 16 && juce::String(argv[16]).startsWithIgnoreCase("dir") ? juce::String(argv[16]).substring(3).getIntValue() : 2) / 6.0f); // v0.29: 7 directions (default Pendulum = item 2); argv[16] = dir<n> picks another item, "dir6" = Chance mix set("seq_prob", 0.8f); set("seq_loop", loopKnob / 32.0f); set("seq_seed", 0.0f);
     // v0.6: a few non-default per-step values and settings so every lane has something to show
     for (int i : {0, 4, 8, 12}) proc.sequencer().setRatchet(i, i == 0 ? 3 : (i == 4 ? 2 : (i == 8 ? 4 : 8)));
     proc.sequencer().setStepGate(2, 80); proc.sequencer().setStepGate(6, 25); proc.sequencer().setStepGate(9, 100);
@@ -70,7 +70,7 @@ int main(int argc, char** argv)
     if (argc > 15 && juce::String(argv[15]).startsWithIgnoreCase("uiview")) proc.setUiView(juce::String(argv[15]).substring(6).getIntValue()); // v0.18: the saved view the editor should open in
     std::unique_ptr<juce::AudioProcessorEditor> ed(proc.createEditor());
     const int w = argc > 2 ? std::atoi(argv[2]) : 840;
-    ed->setSize(w, int(w * (WT8_MIDI_FX ? 582.0 : 970.0) / 840.0)); // v0.16: 840 x 970 (v0.15: 840 x 934; v0.9-v0.14: 840 x 898)
+    ed->setSize(w, int(w * (WT8_MIDI_FX ? 694.0 : 970.0) / 840.0)); // v0.16: 840 x 970 (v0.15: 840 x 934; v0.9-v0.14: 840 x 898)
     if (argc > 3)
         for (auto* c : ed->getChildren())
             if (auto* b = dynamic_cast<juce::TextButton*>(c))
@@ -95,6 +95,10 @@ int main(int argc, char** argv)
         for (auto* c : ed->getChildren())
             if (auto* b = dynamic_cast<juce::TextButton*>(c))
                 if (b->getButtonText() == "COPY") b->setToggleState(true, juce::sendNotificationSync);
+    if (argc > 17 && juce::String(argv[17]).equalsIgnoreCase("chance")) // v0.29: open the Chance mix pop-over (argv[16] should be dir6)
+        for (auto* c : ed->getChildren())
+            if (auto* b = dynamic_cast<juce::TextButton*>(c))
+                if (b->getButtonText() == "CHANCE") b->setToggleState(true, juce::sendNotificationSync);
     auto img = ed->createComponentSnapshot(ed->getLocalBounds(), true, 1.0f);
     juce::File f(argc > 1 ? argv[1] : "editor.png");
     f.deleteFile();

@@ -179,13 +179,47 @@ int main()
         const float loud = runBlocks(sp, 80, fin);
         check(loud > 0.02f, "probability back to 100%: sequence sounds");
         float worst = 0;
-        for (int dir = 0; dir < 4; ++dir)
+        for (int dir = 0; dir < 7; ++dir) // v0.29: seven directions
         {
             setPlain(sp, "seq_dir", (float) dir); setPlain(sp, "seq_pendrep", (float) (dir & 1)); setPlain(sp, "seq_loop", (float) (dir * 3));
             setPlain(sp, "seq_seed", (float) (dir * 7)); setPlain(sp, "seq_prob", 0.7f);
             worst = std::fmax(worst, runBlocks(sp, 60, fin));
         }
         check(fin && worst > 0.02f && worst <= 1.5f, "all directions / loop / seed settings play finite audio");
+
+        // v0.29: Drunk walk / Random no-repeat / Chance mix. The new parameters default to "as before", sort after everything older, and old states load unchanged.
+        {
+            const char* chanceIds[] = {"seq_cw_fwd", "seq_cw_back", "seq_cw_pend", "seq_cw_ping", "seq_cw_rand", "seq_cw_drunk", "seq_run_min", "seq_run_max"};
+            const float chanceDef[] = {100, 60, 40, 0, 20, 0, 4, 16};
+            bool defOk = true, hintOk = true;
+            for (int q = 0; q < 8; ++q)
+            {
+                defOk = defOk && std::fabs(getPlain(d, chanceIds[q]) - chanceDef[q]) < 0.01f; // (an integer parameter's stored float can be 60.000004)
+                hintOk = hintOk && d.apvts.getParameter(chanceIds[q])->getVersionHint() == 9;
+            }
+            check(defOk, "v0.29: Chance mix parameters start at the Unofficial Dub Stab Plaits defaults");
+            check(hintOk, "v0.29: Chance mix parameters use version hint 9 (after every older one)");
+            auto* dirParam = dynamic_cast<juce::AudioParameterChoice*>(d.apvts.getParameter("seq_dir"));
+            check(dirParam != nullptr && dirParam->choices.size() == 7 && dirParam->choices[0] == "Forward" && dirParam->choices[1] == "Backward"
+                  && dirParam->choices[2] == "Pendulum" && dirParam->choices[3] == "Random" && dirParam->choices[4] == "Drunk walk"
+                  && dirParam->choices[5] == "Random no-repeat" && dirParam->choices[6] == "Chance mix", "v0.29: the older four directions keep their places, the new three come after them");
+            // a project saved before v0.29 (Direction = Random = 3, no Chance mix parameters) still says Random, and the new parameters take their defaults
+            WT8AudioProcessor oldSrc; setPlain(oldSrc, "seq_dir", 3.f); setPlain(oldSrc, "seq_seed", 4.f); setPlain(oldSrc, "seq_cw_fwd", 77.f);
+            juce::MemoryBlock oldSaved; oldSrc.getStateInformation(oldSaved);
+            auto oldXml = juce::AudioProcessor::getXmlFromBinary(oldSaved.getData(), (int) oldSaved.getSize());
+            for (auto* id : chanceIds) while (auto* ch = oldXml->getChildByAttribute("id", id)) oldXml->removeChildElement(ch, true);
+            juce::MemoryBlock oldState29; juce::AudioProcessor::copyXmlToBinary(*oldXml, oldState29);
+            WT8AudioProcessor loaded29; setPlain(loaded29, "seq_cw_fwd", 5.f); setPlain(loaded29, "seq_run_max", 30.f);
+            loaded29.setStateInformation(oldState29.getData(), (int) oldState29.getSize());
+            bool defaultsBack = true; for (int q = 0; q < 8; ++q) defaultsBack = defaultsBack && std::fabs(getPlain(loaded29, chanceIds[q]) - chanceDef[q]) < 0.01f;
+            check(getPlain(loaded29, "seq_dir") == 3.f && getPlain(loaded29, "seq_seed") == 4.f && defaultsBack, "v0.29: a project saved before Chance mix keeps Direction = Random and gets the Chance mix defaults");
+            // new settings survive a save and reopen
+            WT8AudioProcessor newSrc; setPlain(newSrc, "seq_dir", 6.f); setPlain(newSrc, "seq_cw_ping", 55.f); setPlain(newSrc, "seq_cw_drunk", 12.f); setPlain(newSrc, "seq_run_min", 2.f); setPlain(newSrc, "seq_run_max", 31.f);
+            juce::MemoryBlock newSaved; newSrc.getStateInformation(newSaved);
+            WT8AudioProcessor newDst; newDst.setStateInformation(newSaved.getData(), (int) newSaved.getSize());
+            check(getPlain(newDst, "seq_dir") == 6.f && std::fabs(getPlain(newDst, "seq_cw_ping") - 55.f) < 0.01f && std::fabs(getPlain(newDst, "seq_cw_drunk") - 12.f) < 0.01f
+                  && std::fabs(getPlain(newDst, "seq_run_min") - 2.f) < 0.01f && std::fabs(getPlain(newDst, "seq_run_max") - 31.f) < 0.01f, "v0.29: Chance mix settings restore");
+        }
 
         // new settings and per-step probability survive a save and reopen
         WT8AudioProcessor src; src.sequencer().deserialize("60:100:75,r,67:100:30");

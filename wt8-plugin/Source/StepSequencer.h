@@ -40,6 +40,16 @@ struct SeqHostInfo
     double bpm = 0.0; // <= 0: unknown (120 is used)
 };
 
+// v0.29: settings of the "Chance mix" direction. Six orders, each with a relative weight 0..100 (0 = never picked); an order is kept
+// for a run of runMin..runMax steps, then the next one is picked by weight (the order that just ended is left out unless it is the
+// only one with a weight). The defaults are the ones the same feature has in particledots' Unofficial Dub Stab Plaits.
+struct ChanceSettings
+{
+    enum { Forward, Backward, Pendulum, PingPong, Random, Drunk, kNumModes };
+    int weight[kNumModes] = {100, 60, 40, 0, 20, 0};
+    int runMin = 4, runMax = 16; // 1..32 steps
+};
+
 struct SeqSettings
 {
     bool  play = false;       // "Free" sync: run from the Play button, from step 1, at the host tempo
@@ -51,7 +61,7 @@ struct SeqSettings
 
     // v0.4 playback options (the defaults reproduce v0.3 behaviour exactly)
     int   loopLen = 0;        // 0 = whole pattern; 1..32 = loop only the first N steps (clamped to the pattern length)
-    int   direction = 0;      // 0 forward, 1 backward, 2 pendulum, 3 random
+    int   direction = 0;      // 0 forward, 1 backward, 2 pendulum, 3 random, 4 drunk walk, 5 random no-repeat, 6 chance mix (4-6 since v0.29)
     bool  pendRepeat = false; // pendulum: the two end steps play twice (1-2-3-3-2-1) instead of once (1-2-3-2-1)
     float prob = 1.0f;        // global probability 0..1, multiplied with each step's own probability
     int   seed = 0;           // 0 = different every time playback starts; 1..n = the same random choices every time
@@ -66,6 +76,9 @@ struct SeqSettings
     float swing = 50.f;       // 50..75 (%): MPC-style. 50 = straight, 66.7 = triplet feel, 75 = dotted. Every second step is delayed.
     float accent = 0.3f;      // 0..1: how much velocity an accented step gets on top of its own (1 = +127, capped at 127)
     int   octMode = 0;        // see octModeName(): which octave jump a step makes when its octave-jump roll succeeds
+
+    // v0.29: only used by direction 6 (chance mix). The defaults leave every older setting playing exactly as before.
+    ChanceSettings chance;
 };
 
 class StepSequencer
@@ -73,7 +86,7 @@ class StepSequencer
   public:
     static constexpr int kMaxSteps = 32;
     static constexpr int kNumDivisions = 8;
-    static constexpr int kNumDirections = 4;
+    static constexpr int kNumDirections = 7;
     static constexpr int kMaxRatchet = 8;
     static double divisionQuarterNotes(int division); // 0..3 = 1/4 1/8 1/16 1/32, 4..7 = triplets
     static const char* divisionName(int division);
@@ -110,7 +123,12 @@ class StepSequencer
 
     /** Which pattern step plays at absolute step counter `k` (0 = bar start / first step). Pure function: the same
         inputs always give the same step, so playback does not depend on how the host chops audio into blocks. */
-    static int stepIndexFor(long long k, int loopLength, int direction, bool pendulumRepeatEnds, uint64_t randomKey);
+    static int stepIndexFor(long long k, int loopLength, int direction, bool pendulumRepeatEnds, uint64_t randomKey,
+                            uint32_t orderSeed = 0, const ChanceSettings* chance = nullptr);
+    /** v0.29: the three newer orders (drunk walk 4, random no-repeat 5, chance mix 6). Pure functions of (orderSeed, k, loop length
+        [, chance settings]): the same inputs give the same step on every pass and in every block size. orderSeed is the SEED knob
+        itself (1..99) or, with SEED off, a number drawn fresh at every start. k below 0 counts as 0. */
+    static int newOrderStep(long long k, int loopLength, int direction, uint32_t orderSeed, const ChanceSettings* chance);
 
     StepSequencer();
 

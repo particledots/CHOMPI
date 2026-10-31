@@ -197,15 +197,140 @@ uint64_t StepSequencer::nextRandom()
 
 const char* StepSequencer::directionName(int d)
 {
-    static const char* n[kNumDirections] = {"Forward", "Backward", "Pendulum", "Random"};
+    static const char* n[kNumDirections] = {"Forward", "Backward", "Pendulum", "Random", "Drunk walk", "Random no-repeat", "Chance mix"};
     return n[std::max(0, std::min(kNumDirections - 1, d))];
 }
 
-int StepSequencer::stepIndexFor(long long k, int L, int direction, bool pendRepeat, uint64_t key)
+// ---- v0.29: drunk walk, random no-repeat, chance mix ----
+// These three step orders, and the small integer hash they use (a "lowbias32"-style mixer), were written by particledots for
+// the plug-in "Unofficial Dub Stab Plaits" (MIT, (c) 2026 particledots) and are carried over here as their own code; they are not
+// part of Narti Live's original DUB STAB PLAITS script, which only plays step n % length. For the same SEED (1..99) and loop
+// length they give the same steps as that plug-in.
+namespace
+{
+uint32_t mix32(uint32_t x)
+{
+    x ^= x >> 16; x *= 0x7feb352dU;
+    x ^= x >> 15; x *= 0x846ca68bU;
+    x ^= x >> 16;
+    return x;
+}
+uint32_t hash4(uint32_t a, uint32_t b, uint32_t c, uint32_t d)
+{
+    uint32_t h = mix32(a + 0x9E3779B9U);
+    h = mix32(h ^ (b + 0x85EBCA6BU));
+    h = mix32(h ^ (c + 0xC2B2AE35U));
+    return mix32(h ^ (d + 0x27D4EB2FU));
+}
+constexpr long long kEpoch = 256; // drunk walk and chance mix restart from a fresh position every 256 steps, so any step can be found quickly
+} // namespace
+
+int StepSequencer::newOrderStep(long long n, int L, int direction, uint32_t seed, const ChanceSettings* chance)
+{
+    L = std::max(1, std::min(kMaxSteps, L));
+    if (n < 0) n = 0;
+    switch (direction)
+    {
+        case 5: // random no-repeat: every step once, in a new order each time round (the first step of a round can equal the last of the one before)
+        {
+            int perm[kMaxSteps];
+            for (int i = 0; i < L; ++i) perm[i] = i;
+            const uint32_t cycleLo = (uint32_t) ((n / L) & 0xffffffffLL);
+            for (int i = L - 1; i > 0; --i)
+            {
+                const int j = (int) (hash4(seed, cycleLo, (uint32_t) i, 2) % (uint32_t) (i + 1));
+                std::swap(perm[i], perm[j]);
+            }
+            return perm[n % L];
+        }
+        case 4: // drunk walk: each step moves one to the left (40 %), one to the right (40 %) or stays (20 %), round the loop
+        {
+            const uint32_t epoch = (uint32_t) ((n / kEpoch) & 0xffffffffLL);
+            const int m = (int) (n % kEpoch);
+            int c = (int) (hash4(seed, epoch, 0, 3) % (uint32_t) L);
+            for (int i = 1; i <= m; ++i)
+            {
+                const uint32_t r = hash4(seed, epoch, (uint32_t) i, 4) % 10;
+                c += r < 4 ? -1 : (r < 8 ? 1 : 0);
+                c = ((c % L) + L) % L;
+            }
+            return c;
+        }
+        case 6: // chance mix: runs of random length, each in an order picked by the weights
+        {
+            const ChanceSettings defaults;
+            const ChanceSettings& cs = chance != nullptr ? *chance : defaults;
+            const uint32_t epoch = (uint32_t) ((n / kEpoch) & 0xffffffffLL);
+            const int m = (int) (n % kEpoch);
+            auto draw = [&](uint32_t k) { return hash4(seed, epoch, k, 5); };
+            const int lo = std::max(1, std::min(cs.runMin, cs.runMax)), hi = std::max(cs.runMin, cs.runMax);
+            uint32_t k = 0;
+            int c = (int) (draw(k++) % (uint32_t) L), pdir = 1, mode = -1, remaining = 0;
+            for (int i = 0; i <= m; ++i)
+            {
+                if (remaining <= 0)
+                {
+                    // pick the next order; the one just finished is left out unless it is the only one with a weight
+                    int total = 0, others = 0;
+                    for (int q = 0; q < ChanceSettings::kNumModes; ++q) { total += cs.weight[q]; if (q != mode) others += cs.weight[q]; }
+                    const int usable = others > 0 ? others : total;
+                    int pick = ChanceSettings::Forward;
+                    if (usable > 0)
+                    {
+                        int r = (int) (draw(k++) % (uint32_t) usable);
+                        for (int q = 0; q < ChanceSettings::kNumModes; ++q)
+                        {
+                            const int w = (others > 0 && q == mode) ? 0 : cs.weight[q];
+                            if (r < w) { pick = q; break; }
+                            r -= w;
+                        }
+                    }
+                    mode = pick;
+                    remaining = lo + (hi > lo ? (int) (draw(k++) % (uint32_t) (hi - lo + 1)) : 0);
+                }
+                if (i > 0)
+                {
+                    switch (mode)
+                    {
+                        case ChanceSettings::Backward: c = (c + L - 1) % L; break;
+                        case ChanceSettings::Pendulum:
+                            if (L > 1)
+                            {
+                                c += pdir;
+                                if (c >= L) { c = L - 2; pdir = -1; }
+                                else if (c < 0) { c = 1; pdir = 1; }
+                            }
+                            break;
+                        case ChanceSettings::PingPong:
+                            if (c + pdir >= L || c + pdir < 0) pdir = -pdir; else c += pdir;
+                            break;
+                        case ChanceSettings::Random: c = (int) (draw(k++) % (uint32_t) L); break;
+                        case ChanceSettings::Drunk:
+                        {
+                            const uint32_t r = draw(k++) % 10;
+                            c += r < 4 ? -1 : (r < 8 ? 1 : 0);
+                            c = ((c % L) + L) % L;
+                            break;
+                        }
+                        default: c = (c + 1) % L; break;
+                    }
+                }
+                --remaining;
+            }
+            return c;
+        }
+        default:
+            return (int) (n % L);
+    }
+}
+
+int StepSequencer::stepIndexFor(long long k, int L, int direction, bool pendRepeat, uint64_t key, uint32_t orderSeed, const ChanceSettings* chance)
 {
     if (L <= 1) return 0;
     switch (direction)
     {
+        case 4: case 5: case 6: // v0.29
+            return newOrderStep(k, L, direction, orderSeed, chance);
         case 1: // backward
             return L - 1 - (int) posMod(k, L);
         case 2: // pendulum: 1-2-3-2-1-2-3...  or, with repeated ends, 1-2-3-3-2-1-1-2-3...
@@ -803,7 +928,10 @@ int StepSequencer::process(double sr, int numSamples, const SeqHostInfo& h, cons
             }
         }
         const long long kk = k - kOff_;
-        const int idx = stepIndexFor(kk, loop, s.direction, s.pendRepeat, key);
+        // v0.29: the seed of the drunk / no-repeat / chance orders is the SEED knob itself (so a given SEED always walks the same way),
+        // or, with SEED off, a number taken from this run's random key
+        const uint32_t orderSeed = s.seed > 0 ? (uint32_t) s.seed : (uint32_t) (key ^ (key >> 32));
+        const int idx = stepIndexFor(kk, loop, s.direction, s.pendRepeat, key, orderSeed, &s.chance);
         displayIdx_.store(idx, std::memory_order_relaxed);
         const SeqStep& st = steps_[idx];
         bool fire = !st.rest && !s.mute;

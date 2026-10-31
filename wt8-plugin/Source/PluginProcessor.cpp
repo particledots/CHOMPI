@@ -120,6 +120,18 @@ juce::AudioProcessorValueTreeState::ParameterLayout WT8AudioProcessor::createLay
     l.add(f("filterenv", "Filter Envelope Amount", -1.f, 1.f, 0.f, 7));
     l.add(f("filterdecay", "Filter Envelope Decay", 0.f, 1.f, 0.4f, 7));
 #endif
+
+    // v0.29 "Chance mix" direction (seq_dir item 6; items 4 and 5 are Drunk walk and Random no-repeat and need no parameters of their own).
+    // Version hint 9: added after v0.28 shipped. The defaults are the ones Unofficial Dub Stab Plaits starts with; they only matter
+    // once Direction is set to "Chance mix", so every older project plays as before.
+    l.add(i("seq_cw_fwd",   "Seq Chance Weight Forward",   0, 100, 100, 9));
+    l.add(i("seq_cw_back",  "Seq Chance Weight Backward",  0, 100, 60, 9));
+    l.add(i("seq_cw_pend",  "Seq Chance Weight Pendulum",  0, 100, 40, 9));
+    l.add(i("seq_cw_ping",  "Seq Chance Weight Ping-pong", 0, 100, 0, 9));
+    l.add(i("seq_cw_rand",  "Seq Chance Weight Random",    0, 100, 20, 9));
+    l.add(i("seq_cw_drunk", "Seq Chance Weight Drunk",     0, 100, 0, 9));
+    l.add(i("seq_run_min",  "Seq Chance Shortest Run",     1, StepSequencer::kMaxSteps, 4, 9));
+    l.add(i("seq_run_max",  "Seq Chance Longest Run",      1, StepSequencer::kMaxSteps, 16, 9));
     return l;
 }
 
@@ -317,6 +329,12 @@ int WT8AudioProcessor::runSequencer(int numSamples, bool& xposeOn)
     ss.swing      = *apvts.getRawParameterValue("seq_swing");
     ss.accent     = *apvts.getRawParameterValue("seq_accent");
     ss.octMode    = (int) *apvts.getRawParameterValue("seq_octmode");
+    {
+        static const char* const ids[ChanceSettings::kNumModes] = {"seq_cw_fwd", "seq_cw_back", "seq_cw_pend", "seq_cw_ping", "seq_cw_rand", "seq_cw_drunk"};
+        for (int q = 0; q < ChanceSettings::kNumModes; ++q) ss.chance.weight[q] = juce::roundToInt((float) *apvts.getRawParameterValue(ids[q])); // rounded, not cut: an integer parameter's stored float can be 59.999996
+        ss.chance.runMin = juce::roundToInt((float) *apvts.getRawParameterValue("seq_run_min"));
+        ss.chance.runMax = juce::roundToInt((float) *apvts.getRawParameterValue("seq_run_max"));
+    }
     return seq_.process(sampleRate_, numSamples, host, ss, seqEvents_, kSeqEventCapacity);
 }
 

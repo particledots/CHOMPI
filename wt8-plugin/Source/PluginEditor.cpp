@@ -22,9 +22,12 @@ juce::Font makeFont(float height, bool bold = false)
 // v0.16: a seventh row (CHAIN) makes it another 36 px taller
 #if WT8_MIDI_FX
 // the MIDI effect build has no sound knobs: the two knob rows (378 px) and the gap below them are gone
-constexpr int kWindowW = 840, kWindowH = 970 - 378 - 10;
+// v0.29: the six sequencer knobs (GATE PROB / LOOP SEED / SWING ACCENT) sit in a strip under the sequencer panel instead of in a column inside it
+constexpr int kKnobStripH = 112;
+constexpr int kWindowW = 840, kWindowH = 970 - 378 - 10 + kKnobStripH;
 constexpr int kKnobRowsH = 0;
 #else
+constexpr int kKnobStripH = 0;
 constexpr int kWindowW = 840, kWindowH = 970;
 constexpr int kKnobRowsH = 378;
 #endif
@@ -793,6 +796,12 @@ WT8Editor::WT8Editor(WT8AudioProcessor& p) : juce::AudioProcessorEditor(&p), pro
                  &addKnob("seq_loop",  "LOOP",   Kind::LoopLength), &addKnob("seq_seed",   "SEED",   Kind::Seed),
                  &addKnob("seq_swing", "SWING",  Kind::Swing),      &addKnob("seq_accent", "ACCENT", Kind::Percent)};
 
+    // v0.29: Chance mix controls (in the pop-over; the knobs are moved into it below, once the editor's other children exist)
+    chanceKnobs_ = {&addKnob("seq_cw_fwd",   "FWD",      Kind::Int), &addKnob("seq_cw_back",  "BACK",     Kind::Int),
+                    &addKnob("seq_cw_pend",  "PEND",     Kind::Int), &addKnob("seq_cw_ping",  "PING-PONG", Kind::Int),
+                    &addKnob("seq_cw_rand",  "RANDOM",   Kind::Int), &addKnob("seq_cw_drunk", "DRUNK",    Kind::Int),
+                    &addKnob("seq_run_min",  "SHORTEST", Kind::Int), &addKnob("seq_run_max",  "LONGEST",  Kind::Int)};
+
     for (auto* b : {&recBtn_, &restBtn_, &delBtn_, &clearBtn_, &playBtn_, &muteBtn_}) addAndMakeVisible(*b);
     recBtn_.setClickingTogglesState(true);
     recBtn_.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xffd9534f));
@@ -879,6 +888,10 @@ WT8Editor::WT8Editor(WT8AudioProcessor& p) : juce::AudioProcessorEditor(&p), pro
 
     pendBtn_.setClickingTogglesState(true);
     addAndMakeVisible(pendBtn_);
+    addAndMakeVisible(chanceBtn_); // v0.29
+    chanceBtn_.setClickingTogglesState(true);
+    chanceBtn_.onClick = [this] { showChancePanel(chanceBtn_.getToggleState()); };
+    chanceDoneBtn_.onClick = [this] { showChancePanel(false); };
     pendAtt_ = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(proc_.apvts, "seq_pendrep", pendBtn_);
 
     // MIDI XPOSE: while on, the last key played sets the pattern transpose (C3 = none); RESET puts it back to 0
@@ -1012,7 +1025,19 @@ WT8Editor::WT8Editor(WT8AudioProcessor& p) : juce::AudioProcessorEditor(&p), pro
                                                                        &presetBox_, &presetPrevBtn_, &presetNextBtn_, &presetSaveBtn_, &presetFolderBtn_})
         c->setVisible(false);
 #endif
+    // v0.29: the pop-over is the last child, so it floats above the rows and the rings; it starts closed
+    addChildComponent(chancePanel_);
+    for (auto* k : chanceKnobs_) { chancePanel_.addAndMakeVisible(k->slider); chancePanel_.addAndMakeVisible(k->name); }
+    chancePanel_.addAndMakeVisible(chanceDoneBtn_);
+    chancePanel_.setVisible(false);
     startTimerHz(15);
+}
+
+void WT8Editor::showChancePanel(bool show)
+{
+    if (show) { layoutChancePanel(); chancePanel_.toFront(false); }
+    chancePanel_.setVisible(show);
+    if (chanceBtn_.getToggleState() != show) chanceBtn_.setToggleState(show, juce::dontSendNotification);
 }
 
 void WT8Editor::syncViewFromProcessor()
@@ -1034,6 +1059,11 @@ void WT8Editor::timerCallback()
     retrigBtn_.setEnabled(syncBox_.getSelectedItemIndex() == 0); // v0.13: like PLAY, a Free-sync control (in Logic sync the bar decides where step 1 is)
     if (loopEndBtn_.getToggleState() != proc_.getSlotAtLoopEnd()) loopEndBtn_.setToggleState(proc_.getSlotAtLoopEnd(), juce::dontSendNotification); // a project was opened
     pendBtn_.setEnabled(dirBox_.getSelectedItemIndex() == 2);  // end-repeat only applies to the pendulum
+    {   // v0.29: the Chance mix controls only apply to Direction "Chance mix"; leaving that direction closes the pop-over
+        const bool chance = dirBox_.getSelectedItemIndex() == 6;
+        chanceBtn_.setEnabled(chance);
+        if (!chance && chancePanel_.isVisible()) showChancePanel(false);
+    }
     // v0.24: while an LFO is tempo-synced its RATE knob has no effect (the knob keeps its value for when it is set back to Free), so show it dimmed
     if (lfoKnobs_[1] != nullptr && lfoKnobs_[3] != nullptr)
     {
@@ -1423,6 +1453,26 @@ WT8Editor::~WT8Editor()
     }
 }
 
+void ChancePanel::paint(juce::Graphics& g)
+{
+    const auto r = getLocalBounds().toFloat();
+    g.setColour(juce::Colours::black.withAlpha(0.35f));
+    g.fillRoundedRectangle(r.translated(0.0f, 3.0f * scale), 10.0f * scale); // a soft shadow: this panel floats above the rows
+    g.setColour(kPanel.brighter(0.08f));
+    g.fillRoundedRectangle(r, 10.0f * scale);
+    g.setColour(kAccent.withAlpha(0.6f));
+    g.drawRoundedRectangle(r.reduced(0.5f), 10.0f * scale, 1.0f);
+    g.setColour(kAccent);
+    g.setFont(makeFont(11.0f * scale, true));
+    g.drawText("CHANCE MIX", juce::Rectangle<int>(int(14 * scale), int(6 * scale), int(100 * scale), int(20 * scale)), juce::Justification::centredLeft);
+    g.setColour(kDim);
+    g.setFont(makeFont(10.5f * scale));
+    g.drawText("How likely each order is to come next (0 = never), and how many steps it plays before the next is picked",
+               juce::Rectangle<int>(int(100 * scale), int(6 * scale), getWidth() - int(180 * scale), int(20 * scale)), juce::Justification::centredLeft);
+    g.setColour(kEdge.brighter(0.25f));
+    g.fillRect(dividerBounds);
+}
+
 void WT8Editor::paint(juce::Graphics& g)
 {
     g.fillAll(kBg);
@@ -1568,11 +1618,28 @@ void WT8Editor::resized()
 
     // ---- sequencer strip ----
     if (!WT8_MIDI_FX) full.removeFromTop(gap);
+    // v0.29 (dotriaconta-tone): the six knobs sit in a strip of their own below the sequencer panel, GATE PROB | LOOP SEED | SWING ACCENT
+    juce::Rectangle<int> knobStrip;
+    if (kKnobStripH > 0) knobStrip = full.removeFromBottom(int(kKnobStripH * scale));
     seqBounds_ = full.withTrimmedBottom(margin);
     auto inner = seqBounds_.withTrimmedTop(int(24 * scale)).reduced(int(8 * scale), int(4 * scale));
 
-    // right: 2 columns x 3 rows of knobs (GATE PROB / LOOP SEED / SWING ACCENT)
+    if (kKnobStripH > 0)
     {
+        const int cellW = int(96 * scale), third = knobStrip.getWidth() / 3;
+        for (size_t n = 0; n < seqKnobs_.size(); ++n)
+        {
+            const int x = knobStrip.getX() + (int) (n / 2) * third + (third - 2 * cellW) / 2 + (int) (n % 2) * cellW;
+            auto cell = juce::Rectangle<int>(x, knobStrip.getY(), cellW, knobStrip.getHeight() - int(8 * scale));
+            auto* k = seqKnobs_[n];
+            k->name.setBounds(cell.removeFromTop(int(14 * scale)));
+            k->name.getProperties().set("fontHeight", 12.0f * scale);
+            styleKnobValue(*k, int(76 * scale), scale);
+            k->slider.setBounds(cell);
+        }
+    }
+    else
+    {   // IPMOK: right: 2 columns x 3 rows of knobs (GATE PROB / LOOP SEED / SWING ACCENT)
         auto block = inner.removeFromRight(int(176 * scale));
         inner.removeFromRight(int(8 * scale));
         const int cw = block.getWidth() / 2, ch = block.getHeight() / 3;
@@ -1621,8 +1688,9 @@ void WT8Editor::resized()
     put(loopEndBtn_, 84);
 
     nextRow(); // DIRECTION: how the pattern is walked, and the octave jump
-    put(dirLabel_, 66); put(dirBox_, 92); put(pendBtn_, 62); div(8);
+    put(dirLabel_, 66); put(dirBox_, 128); put(pendBtn_, 62); put(chanceBtn_, 70); div(8); // v0.29: wider box for "Random no-repeat", CHANCE opens the Chance mix pop-over
     put(octLabel_, 62); put(octBox_, 140);
+    chanceAnchor_ = juce::Rectangle<int>(inner.getX(), inner.getY(), inner.getWidth(), 0); // the pop-over opens in the row under DIRECTION
 
     nextRow(); // SCALE: which scale the notes are snapped to, and the transpose from MIDI in
     put(scaleLabel_, 66); put(scaleBox_, 170); put(rootLabel_, 34); put(rootBox_, 52); div(8);
@@ -1649,4 +1717,30 @@ void WT8Editor::resized()
     chainOrderLabel_.setBounds(controls);
 
     grid_.setBounds(inner);
+    layoutChancePanel();
+}
+
+// v0.29: size and place the Chance mix pop-over (always laid out, so it is right when it opens) and its knobs
+void WT8Editor::layoutChancePanel()
+{
+    const float scale = getWidth() / 840.0f;
+    const int w = juce::jmin(chanceAnchor_.getWidth(), int(640 * scale)), h = int(150 * scale);
+    chancePanel_.scale = scale;
+    chancePanel_.setBounds(chanceAnchor_.getX(), chanceAnchor_.getY(), w, h);
+    chanceDoneBtn_.setBounds(w - int(66 * scale), int(5 * scale), int(54 * scale), int(22 * scale));
+    // six weights, a gap, two run lengths; cells shrink when the panel is narrow (IPMOK has less room)
+    const int pad = int(12 * scale), gapW = int(18 * scale);
+    const int cell = juce::jmin(int(76 * scale), (w - 2 * pad - gapW) / 8);
+    int x = pad;
+    for (size_t n = 0; n < chanceKnobs_.size(); ++n)
+    {
+        if (n == 6) { chancePanel_.dividerBounds = juce::Rectangle<int>(x + gapW / 2, int(36 * scale), 1, h - int(46 * scale)); x += gapW; }
+        auto c = juce::Rectangle<int>(x, int(32 * scale), cell, h - int(40 * scale));
+        auto* k = chanceKnobs_[n];
+        k->name.setBounds(c.removeFromTop(int(14 * scale)));
+        k->name.getProperties().set("fontHeight", (cell < int(64 * scale) ? 9.5f : 11.0f) * scale);
+        styleKnobValue(*k, juce::jmax(40, int(cell * 0.9f)), scale);
+        k->slider.setBounds(c);
+        x += cell;
+    }
 }

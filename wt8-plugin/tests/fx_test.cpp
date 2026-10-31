@@ -62,7 +62,8 @@ int main()
             if (p->apvts.getParameter(id) != nullptr) soundGone = false;
         check(soundGone, "none of the 25 sound parameters exist (the host's automation list shows sequencer parameters only)");
         bool seqThere = true;
-        for (const char* id : {"seq_play", "seq_sync", "seq_div", "seq_gate", "seq_mute", "seq_loop", "seq_dir", "seq_prob", "seq_seed", "seq_scale", "seq_root", "seq_xpose", "seq_swing", "seq_accent", "seq_octmode", "seq_pendrep"})
+        for (const char* id : {"seq_play", "seq_sync", "seq_div", "seq_gate", "seq_mute", "seq_loop", "seq_dir", "seq_prob", "seq_seed", "seq_scale", "seq_root", "seq_xpose", "seq_swing", "seq_accent", "seq_octmode", "seq_pendrep",
+                               "seq_cw_fwd", "seq_cw_back", "seq_cw_pend", "seq_cw_ping", "seq_cw_rand", "seq_cw_drunk", "seq_run_min", "seq_run_max"})
             if (p->apvts.getParameter(id) == nullptr) seqThere = false;
         check(seqThere, "the sequencer parameters are all there");
         printf("  (%d parameters in total)\n", (int) p->getParameters().size());
@@ -97,6 +98,35 @@ int main()
         for (auto& e : ev2) if (!e.on) { auto it = open.find(e.note); if (it != open.end()) open.erase(it); }
         check(open.empty(), "after PLAY is switched off no note is left on (all note-offs arrived)");
         for (auto& e : ev2) if (e.on) { check(false, "no new notes after stop"); break; }
+    }
+
+
+    // v0.29: Drunk walk, Random no-repeat and Chance mix, end to end through the parameters (the engine details are in seq_test)
+    {
+        auto notesFor = [&](int dir, int seed, std::initializer_list<std::pair<const char*, float>> extra) {
+            auto p = makeProc();
+            for (int n = 60; n < 72; ++n) p->sequencer().recordNote(n, 100); // twelve steps, pitch = 60 + step
+            setPlain(*p, "seq_div", 3.f); setPlain(*p, "seq_dir", (float) dir); setPlain(*p, "seq_seed", (float) seed);
+            for (auto& e : extra) setPlain(*p, e.first, e.second);
+            p->apvts.getParameter("seq_play")->setValueNotifyingHost(1.f);
+            std::vector<int> ons; for (auto& e : run(*p, 400, none)) if (e.on) ons.push_back(e.note - 60);
+            return ons;
+        };
+        const auto nr = notesFor(5, 3, {});
+        bool perm = nr.size() >= 48; for (size_t r = 0; perm && r + 12 <= nr.size(); r += 12) { std::set<int> s(nr.begin() + (long) r, nr.begin() + (long) r + 12); perm = s.size() == 12; }
+        check(perm, "Random no-repeat: every round of 12 notes holds all 12 steps once");
+        const auto dr = notesFor(4, 3, {});
+        bool walk = dr.size() >= 48; for (size_t i = 1; i < dr.size(); ++i) { const int d = ((dr[i] - dr[i - 1]) % 12 + 12) % 12; if (d != 0 && d != 1 && d != 11) walk = false; }
+        check(walk, "Drunk walk: each note is one step left, one step right, or the same step");
+        const auto ch = notesFor(6, 3, {{"seq_cw_fwd", 0.f}, {"seq_cw_back", 70.f}, {"seq_cw_pend", 0.f}, {"seq_cw_rand", 0.f}});
+        bool back = ch.size() >= 48; for (size_t i = 1; i < ch.size(); ++i) if (ch[i] != (ch[i - 1] + 11) % 12) back = false;
+        check(back, "Chance mix with only BACK weighted plays backward (the weights reach the sequencer)");
+        const auto c1 = notesFor(6, 7, {}), c2 = notesFor(6, 7, {});
+        check(c1.size() >= 48 && c1 == c2, "Chance mix with SEED 7 plays the same notes in two separate runs");
+        std::set<int> distinct(c1.begin(), c1.end());
+        check(distinct.size() > 3, "Chance mix with the default weights visits several steps");
+        const auto o = notesFor(3, 7, {});
+        check(!o.empty(), "Random (direction 3) still plays");
     }
 
     // pass-through
