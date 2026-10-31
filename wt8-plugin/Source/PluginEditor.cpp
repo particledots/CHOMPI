@@ -1690,7 +1690,7 @@ void WT8Editor::resized()
     nextRow(); // DIRECTION: how the pattern is walked, and the octave jump
     put(dirLabel_, 66); put(dirBox_, 128); put(pendBtn_, 62); put(chanceBtn_, 70); div(8); // v0.29: wider box for "Random no-repeat", CHANCE opens the Chance mix pop-over
     put(octLabel_, 62); put(octBox_, 140);
-    chanceAnchor_ = juce::Rectangle<int>(inner.getX(), inner.getY(), inner.getWidth(), 0); // the pop-over opens in the row under DIRECTION
+    chanceAnchor_ = juce::Rectangle<int>(inner.getX(), inner.getY(), inner.getWidth(), 0); // the pop-over opens in the row under DIRECTION (centred across the panel by layoutChancePanel)
 
     nextRow(); // SCALE: which scale the notes are snapped to, and the transpose from MIDI in
     put(scaleLabel_, 66); put(scaleBox_, 170); put(rootLabel_, 34); put(rootBox_, 52); div(8);
@@ -1726,12 +1726,12 @@ void WT8Editor::layoutChancePanel()
     const float scale = getWidth() / 840.0f;
     const int w = juce::jmin(chanceAnchor_.getWidth(), int(640 * scale)), h = int(150 * scale);
     chancePanel_.scale = scale;
-    chancePanel_.setBounds(chanceAnchor_.getX(), chanceAnchor_.getY(), w, h);
+    chancePanel_.setBounds(chanceAnchor_.getX() + (chanceAnchor_.getWidth() - w) / 2, chanceAnchor_.getY(), w, h); // centred, so the two sides match
     chanceDoneBtn_.setBounds(w - int(66 * scale), int(5 * scale), int(54 * scale), int(22 * scale));
     // six weights, a gap, two run lengths; cells shrink when the panel is narrow (IPMOK has less room)
     const int pad = int(12 * scale), gapW = int(18 * scale);
     const int cell = juce::jmin(int(76 * scale), (w - 2 * pad - gapW) / 8);
-    int x = pad;
+    int x = (w - (8 * cell + gapW)) / 2; // the eight knobs and the gap are centred in the panel (same space left and right)
     for (size_t n = 0; n < chanceKnobs_.size(); ++n)
     {
         if (n == 6) { chancePanel_.dividerBounds = juce::Rectangle<int>(x + gapW / 2, int(36 * scale), 1, h - int(46 * scale)); x += gapW; }
