@@ -7,7 +7,7 @@ on:
     paths: ['wt8-plugin/**']
 jobs:
   build:
-    runs-on: macos-26
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - name: Configure
