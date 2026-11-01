@@ -24,7 +24,7 @@ juce::Font makeFont(float height, bool bold = false)
 // the MIDI effect build has no sound knobs: the two knob rows (378 px) and the gap below them are gone
 // v0.29: the six sequencer knobs (GATE PROB / LOOP SEED / SWING ACCENT) sit in a strip under the sequencer panel instead of in a column inside it
 constexpr int kKnobStripH = 112;
-constexpr int kWindowW = 840, kWindowH = 970 - 378 - 10 + kKnobStripH;
+constexpr int kWindowW = 666, kWindowH = 970 - 378 - 10 + kKnobStripH; // v0.29.1: 666 wide (was 840): the rows end about 640 units from the left, so a wider panel only left an empty band at its right
 constexpr int kKnobRowsH = 0;
 #else
 constexpr int kKnobStripH = 0;
@@ -1002,7 +1002,7 @@ WT8Editor::WT8Editor(WT8AudioProcessor& p) : juce::AudioProcessorEditor(&p), pro
     addAndMakeVisible(grid_);
 
     setResizable(true, true);
-    setResizeLimits(630, int(630.0 * kWindowH / kWindowW), 1260, int(1260.0 * kWindowH / kWindowW)); // 630 x 728 .. 1260 x 1455 (v0.9-v0.14: 840 x 898; v0.15: one more row, 840 x 934; v0.16: one more, 840 x 970)
+    setResizeLimits(int(0.75 * kWindowW), int(0.75 * kWindowH), int(1.5 * kWindowW), int(1.5 * kWindowH)); // 630 x 728 .. 1260 x 1455 (v0.9-v0.14: 840 x 898; v0.15: one more row, 840 x 934; v0.16: one more, 840 x 970)
     getConstrainer()->setFixedAspectRatio((double) kWindowW / kWindowH);
     setSize(kWindowW, kWindowH);
     grid_.refresh();
@@ -1477,7 +1477,7 @@ void WT8Editor::paint(juce::Graphics& g)
 {
     g.fillAll(kBg);
 
-    const float scale = getWidth() / 840.0f;
+    const float scale = getWidth() / (float) kWindowW;
 
     // header
     g.setColour(kText);
@@ -1519,7 +1519,7 @@ void WT8Editor::styleKnobValue(Knob& k, int boxW, float scale)
 
 void WT8Editor::resized()
 {
-    const float scale = getWidth() / 840.0f;
+    const float scale = getWidth() / (float) kWindowW;
     const int margin = int(14 * scale);
     const int gap = int(10 * scale);
     const int headerH = int(48 * scale);
@@ -1626,10 +1626,11 @@ void WT8Editor::resized()
 
     if (kKnobStripH > 0)
     {
-        const int cellW = int(96 * scale), third = knobStrip.getWidth() / 3;
+        // six knobs, equally spaced across the window (v0.29.1; v0.29 had three pairs)
+        const int slot = knobStrip.getWidth() / (int) seqKnobs_.size(), cellW = juce::jmin(int(96 * scale), slot);
         for (size_t n = 0; n < seqKnobs_.size(); ++n)
         {
-            const int x = knobStrip.getX() + (int) (n / 2) * third + (third - 2 * cellW) / 2 + (int) (n % 2) * cellW;
+            const int x = knobStrip.getX() + (int) n * slot + (slot - cellW) / 2;
             auto cell = juce::Rectangle<int>(x, knobStrip.getY(), cellW, knobStrip.getHeight() - int(8 * scale));
             auto* k = seqKnobs_[n];
             k->name.setBounds(cell.removeFromTop(int(14 * scale)));
@@ -1723,7 +1724,7 @@ void WT8Editor::resized()
 // v0.29: size and place the Chance mix pop-over (always laid out, so it is right when it opens) and its knobs
 void WT8Editor::layoutChancePanel()
 {
-    const float scale = getWidth() / 840.0f;
+    const float scale = getWidth() / (float) kWindowW;
     const int w = juce::jmin(chanceAnchor_.getWidth(), int(640 * scale)), h = int(150 * scale);
     chancePanel_.scale = scale;
     chancePanel_.setBounds(chanceAnchor_.getX() + (chanceAnchor_.getWidth() - w) / 2, chanceAnchor_.getY(), w, h); // centred, so the two sides match
